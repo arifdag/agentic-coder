@@ -1,0 +1,105 @@
+# Orchestrates isolated code execution environments
+
+version: '3.8'
+
+services:
+  # Python Sandbox Service
+  python-sandbox:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    image: sayzek-sandbox-python:latest
+    container_name: sayzek-python-sandbox
+    volumes:
+      - python_input:/code/input:ro
+      - python_output:/code/output
+    networks:
+      - sandbox-network
+    # Security: Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    # Security: Drop all capabilities, no network
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+
+  # Java Sandbox Service
+  java-sandbox:
+    build:
+      context: ./java
+      dockerfile: Dockerfile
+    image: sayzek-sandbox-java:latest
+    container_name: sayzek-java-sandbox
+    volumes:
+      - java_input:/code/input:ro
+      - java_output:/code/output
+    networks:
+      - sandbox-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 128M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=128M,mode=1777
+
+  # C# Sandbox Service
+  csharp-sandbox:
+    build:
+      context: ./csharp
+      dockerfile: Dockerfile
+    image: sayzek-sandbox-csharp:latest
+    container_name: sayzek-csharp-sandbox
+    volumes:
+      - csharp_input:/code/input:ro
+      - csharp_output:/code/output
+    networks:
+      - sandbox-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 128M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=128M,mode=1777
+
+# Isolated network with no external access
+networks:
+  sandbox-network:
+    driver: bridge
+    internal: true  # No internet access
+
+# Named volumes for code I/O
+volumes:
+  python_input:
+  python_output:
+  java_input:
+  java_output:
+  csharp_input:
+  csharp_output:

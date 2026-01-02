@@ -1,0 +1,82 @@
+[
+  {
+    "error_type": "TypeError",
+    "error_message": "unsupported operand type(s) for +: 'int' and 'str'",
+    "language": "python",
+    "solution": "Python cannot concatenate an integer with a string directly. Convert the integer to a string using str() or use f-strings for formatting.",
+    "code_fix": "# Instead of: result = number + text\nresult = str(number) + text\n# Or use f-string:\nresult = f\"{number}{text}\"",
+    "tags": ["type-error", "concatenation", "beginner"]
+  },
+  {
+    "error_type": "IndexError",
+    "error_message": "list index out of range",
+    "language": "python",
+    "solution": "The index you're trying to access doesn't exist in the list. Either the list is empty or the index is too large. Check the list length before accessing.",
+    "code_fix": "# Instead of: item = my_list[index]\nif index < len(my_list):\n    item = my_list[index]\nelse:\n    item = None  # or handle the error",
+    "tags": ["index-error", "list", "bounds-checking"]
+  },
+  {
+    "error_type": "KeyError",
+    "error_message": "KeyError: 'key_name'",
+    "language": "python",
+    "solution": "The key doesn't exist in the dictionary. Use .get() method with a default value or check if key exists first.",
+    "code_fix": "# Instead of: value = my_dict['key_name']\nvalue = my_dict.get('key_name', default_value)\n# Or check first:\nif 'key_name' in my_dict:\n    value = my_dict['key_name']",
+    "tags": ["key-error", "dictionary", "defensive-coding"]
+  },
+  {
+    "error_type": "AttributeError",
+    "error_message": "'NoneType' object has no attribute",
+    "language": "python",
+    "solution": "A variable is None when you expected it to have a value. Check for None before accessing attributes, or trace back to find why it's None.",
+    "code_fix": "# Instead of: result = obj.method()\nif obj is not None:\n    result = obj.method()\nelse:\n    result = default_value",
+    "tags": ["attribute-error", "none", "null-check"]
+  },
+  {
+    "error_type": "SyntaxError",
+    "error_message": "invalid syntax",
+    "language": "python",
+    "solution": "Check for missing colons after if/for/def/class statements, unmatched parentheses or brackets, or missing quotes in strings.",
+    "code_fix": "# Common fixes:\n# 1. Add colon: if x == 1:  (not 'if x == 1')\n# 2. Match brackets: func((a, b))  (check all open/close)\n# 3. Complete strings: \"text\"  (not 'text)",
+    "tags": ["syntax-error", "beginner", "parsing"]
+  },
+  {
+    "error_type": "NullPointerException",
+    "error_message": "java.lang.NullPointerException",
+    "language": "java",
+    "solution": "An object reference is null when a method or field access is attempted. Add null checks or use Optional class for safer null handling.",
+    "code_fix": "// Instead of: String result = obj.getValue();\nif (obj != null) {\n    String result = obj.getValue();\n}\n// Or use Optional:\nOptional.ofNullable(obj).map(Object::getValue).orElse(defaultValue);",
+    "tags": ["null-pointer", "npe", "null-safety"]
+  },
+  {
+    "error_type": "ArrayIndexOutOfBoundsException",
+    "error_message": "java.lang.ArrayIndexOutOfBoundsException: Index X out of bounds for length Y",
+    "language": "java",
+    "solution": "The array index exceeds the array size. Check the array length before accessing elements or use enhanced for-loop.",
+    "code_fix": "// Instead of: element = array[index];\nif (index >= 0 && index < array.length) {\n    element = array[index];\n}\n// Or use enhanced for-loop:\nfor (String element : array) { ... }",
+    "tags": ["array", "bounds", "index"]
+  },
+  {
+    "error_type": "NullReferenceException",
+    "error_message": "System.NullReferenceException: Object reference not set to an instance of an object",
+    "language": "csharp",
+    "solution": "A variable is null when you try to use it. Use null-conditional operators (?.) or null-coalescing operators (??) for safer access.",
+    "code_fix": "// Instead of: var result = obj.Property;\nvar result = obj?.Property ?? defaultValue;\n// Or explicit check:\nif (obj != null) {\n    var result = obj.Property;\n}",
+    "tags": ["null-reference", "null-safety", "csharp"]
+  },
+  {
+    "error_type": "FormatException",
+    "error_message": "System.FormatException: Input string was not in a correct format",
+    "language": "csharp",
+    "solution": "String cannot be parsed to the target type. Use TryParse instead of Parse for safer conversion.",
+    "code_fix": "// Instead of: int number = int.Parse(input);\nif (int.TryParse(input, out int number)) {\n    // Use number\n} else {\n    // Handle invalid input\n}",
+    "tags": ["format", "parsing", "conversion"]
+  },
+  {
+    "error_type": "ImportError",
+    "error_message": "ModuleNotFoundError: No module named 'module_name'",
+    "language": "python",
+    "solution": "The module is not installed or not in the Python path. Install it using pip or check your virtual environment.",
+    "code_fix": "# Install the module:\n# pip install module_name\n\n# Or if it's a local module, check your PYTHONPATH\n# or use relative imports:\nfrom . import module_name",
+    "tags": ["import-error", "module", "installation"]
+  }
+]
