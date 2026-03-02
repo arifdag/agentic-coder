@@ -140,6 +140,14 @@ def generate(
         console.print(f"\n[yellow]Warning: Tests may not be fully verified[/yellow]")
         if result.get("error_message"):
             console.print(f"[yellow]Last error: {result['error_message']}[/yellow]")
+        if verbose and result.get("verification_result"):
+            vr = result["verification_result"]
+            if vr.get("stdout"):
+                console.print("\n[bold]Sandbox stdout:[/bold]")
+                console.print(vr["stdout"][:2000])
+            if vr.get("stderr"):
+                console.print("\n[bold]Sandbox stderr:[/bold]")
+                console.print(vr["stderr"][:1000])
         sys.exit(1)
 
 

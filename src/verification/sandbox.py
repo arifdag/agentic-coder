@@ -294,6 +294,47 @@ class SandboxExecutor:
             coverage=coverage,
         )
     
+    def _fix_imports(self, test_code: str) -> str:
+        """Fix import statements to use source_module instead of original paths.
+        
+        Args:
+            test_code: Generated test code
+            
+        Returns:
+            Test code with fixed imports
+        """
+        lines = test_code.split('\n')
+        fixed_lines = []
+        has_source_import = False
+        
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('from ') and ' import ' in stripped:
+                if 'source_module' in stripped:
+                    has_source_import = True
+                    fixed_lines.append(line)
+                elif stripped.startswith('from pytest') or stripped.startswith('from typing'):
+                    fixed_lines.append(line)
+                else:
+                    has_source_import = True
+                    fixed_lines.append('from source_module import *')
+            elif stripped.startswith('import ') and not stripped.startswith('import pytest'):
+                if 'source_module' in stripped:
+                    has_source_import = True
+                    fixed_lines.append(line)
+                else:
+                    has_source_import = True
+                    fixed_lines.append('from source_module import *')
+            else:
+                fixed_lines.append(line)
+        
+        result = '\n'.join(fixed_lines)
+        
+        if not has_source_import:
+            result = 'from source_module import *\n\n' + result
+        
+        return result
+    
     def execute(
         self,
         source_code: str,
@@ -316,9 +357,7 @@ class SandboxExecutor:
             
             test_file = workdir / "test_generated.py"
             
-            if "from source_module import" not in test_code and "import source_module" not in test_code:
-                import_line = "from source_module import *\n\n"
-                test_code = import_line + test_code
+            test_code = self._fix_imports(test_code)
             
             test_file.write_text(test_code, encoding="utf-8")
             
