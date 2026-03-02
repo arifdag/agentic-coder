@@ -1,0 +1,29 @@
+# LLM Agent Platform - Phase 1 Dependencies
+
+# LangChain and LangGraph for orchestration
+langchain>=0.3.0
+langgraph>=0.2.0
+langchain-core>=0.3.0
+
+# LLM Providers (free tiers)
+langchain-groq>=0.2.0
+httpx>=0.27.0
+
+# Docker SDK for sandbox execution
+docker>=7.0.0
+
+# Testing frameworks
+pytest>=8.0.0
+coverage>=7.0.0
+
+# CLI
+click>=8.0.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Utilities
+rich>=13.0.0
