@@ -163,15 +163,20 @@ def _print_summary(result: dict):
     table.add_row("Task Type", result.get("task_type", "unknown"))
     table.add_row("Tests Generated", str(len(result.get("test_functions", []))))
     
-    if result.get("verification_result"):
-        vr = result["verification_result"]
-        table.add_row("Verification Passed", str(vr.get("passed", False)))
-        if vr.get("tests_run"):
-            table.add_row("Tests Run", str(vr.get("tests_run", 0)))
-            table.add_row("Tests Passed", str(vr.get("tests_passed", 0)))
-        if vr.get("coverage"):
-            table.add_row("Coverage", f"{vr['coverage']}%")
-    
+    report = result.get("verification_report") or {}
+    if report:
+        table.add_row("Verification Passed", str(report.get("overall_passed", False)))
+        if report.get("coverage") is not None:
+            table.add_row("Coverage", f"{report['coverage']}%")
+        if report.get("coverage_gaps"):
+            table.add_row("Uncovered Lines", report["coverage_gaps"])
+        table.add_row("Summary", report.get("summary", ""))
+
+        for gate in report.get("gates", []):
+            status = "PASS" if gate.get("passed") else "FAIL"
+            n = len(gate.get("findings", []))
+            table.add_row(f"  Gate: {gate['gate_name']}", f"{status} ({n} finding(s))")
+
     console.print("\n")
     console.print(table)
 

@@ -24,6 +24,8 @@ class RepairContext(BaseModel):
     error_message: str = Field(description="Error message from verification")
     line_number: Optional[int] = Field(default=None, description="Line number of error if available")
     suggestion: Optional[str] = Field(default=None, description="Suggested fix approach")
+    coverage_gaps: Optional[str] = Field(default=None, description="Uncovered lines from coverage report")
+    diagnostics: Optional[str] = Field(default=None, description="Full structured diagnostics from verification report")
 
 
 SYSTEM_PROMPT = """You are an expert Python test engineer. Your task is to generate high-quality pytest unit tests.
@@ -83,8 +85,10 @@ Error encountered:
 - Message: {error_message}
 {line_info}
 {suggestion_info}
+{diagnostics_section}
+{coverage_section}
 
-Please fix the test code to resolve this error. Return ONLY the corrected Python test code without any explanations or markdown."""
+Please fix the test code to resolve these issues. Return ONLY the corrected Python test code without any explanations or markdown."""
 
 
 class UnitTestAgent:
@@ -234,6 +238,17 @@ class UnitTestAgent:
         suggestion_info = ""
         if context.suggestion:
             suggestion_info = f"- Suggested fix: {context.suggestion}"
+
+        diagnostics_section = ""
+        if context.diagnostics:
+            diagnostics_section = f"\nFull verification diagnostics:\n{context.diagnostics}"
+
+        coverage_section = ""
+        if context.coverage_gaps:
+            coverage_section = (
+                f"\nCoverage gaps (lines not covered): {context.coverage_gaps}\n"
+                f"Please add tests targeting these uncovered lines."
+            )
         
         prompt = REPAIR_TEMPLATE.format(
             previous_code=context.previous_code,
@@ -241,6 +256,8 @@ class UnitTestAgent:
             error_message=context.error_message,
             line_info=line_info,
             suggestion_info=suggestion_info,
+            diagnostics_section=diagnostics_section,
+            coverage_section=coverage_section,
         )
         
         messages = [

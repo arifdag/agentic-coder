@@ -25,6 +25,7 @@ class ExecutionResult(BaseModel):
     tests_passed: int = Field(default=0, description="Number of tests passed")
     tests_failed: int = Field(default=0, description="Number of tests failed")
     coverage: Optional[float] = Field(default=None, description="Code coverage percentage")
+    coverage_gaps: Optional[str] = Field(default=None, description="Uncovered lines from term-missing")
 
 
 class SandboxExecutor:
@@ -121,7 +122,7 @@ class SandboxExecutor:
         return result
     
     def _parse_coverage(self, stdout: str) -> Optional[float]:
-        """Parse coverage from pytest output.
+        """Parse coverage percentage from pytest-cov output.
         
         Args:
             stdout: Standard output
@@ -133,6 +134,21 @@ class SandboxExecutor:
         match = re.search(pattern, stdout)
         if match:
             return float(match.group(1))
+        return None
+
+    def _parse_coverage_gaps(self, stdout: str) -> Optional[str]:
+        """Parse missing line numbers from pytest-cov term-missing output.
+
+        Looks for the 'Missing' column in coverage output, e.g.:
+            source_module   30      5    83%   12, 15-18, 23
+
+        Returns:
+            Comma-separated missing lines string, or None
+        """
+        pattern = r'source_module\s+\d+\s+\d+\s+\d+%\s+(.+)'
+        match = re.search(pattern, stdout)
+        if match:
+            return match.group(1).strip()
         return None
     
     def _execute_docker(
@@ -169,7 +185,11 @@ class SandboxExecutor:
         try:
             container = client.containers.run(
                 self.config.image_name,
-                command=["pytest", "-v", "--tb=short", "test_generated.py"],
+                command=[
+                    "pytest", "-v", "--tb=short",
+                    "--cov=source_module", "--cov-report=term-missing",
+                    "test_generated.py",
+                ],
                 volumes={
                     str(workdir.absolute()): {
                         "bind": "/workspace",
@@ -205,6 +225,7 @@ class SandboxExecutor:
         
         parsed = self._parse_pytest_output(stdout, stderr)
         coverage = self._parse_coverage(stdout)
+        coverage_gaps = self._parse_coverage_gaps(stdout)
         
         success = exit_code == 0 and parsed["tests_failed"] == 0 and parsed["error_type"] is None
         
@@ -220,6 +241,7 @@ class SandboxExecutor:
             tests_passed=parsed["tests_passed"],
             tests_failed=parsed["tests_failed"],
             coverage=coverage,
+            coverage_gaps=coverage_gaps,
         )
     
     def _execute_subprocess(
@@ -242,7 +264,11 @@ class SandboxExecutor:
         
         try:
             result = subprocess.run(
-                ["pytest", "-v", "--tb=short", "test_generated.py"],
+                [
+                    "pytest", "-v", "--tb=short",
+                    "--cov=source_module", "--cov-report=term-missing",
+                    "test_generated.py",
+                ],
                 cwd=str(workdir),
                 capture_output=True,
                 text=True,
@@ -277,6 +303,7 @@ class SandboxExecutor:
         
         parsed = self._parse_pytest_output(stdout, stderr)
         coverage = self._parse_coverage(stdout)
+        coverage_gaps = self._parse_coverage_gaps(stdout)
         
         success = exit_code == 0 and parsed["tests_failed"] == 0 and parsed["error_type"] is None
         
@@ -292,6 +319,7 @@ class SandboxExecutor:
             tests_passed=parsed["tests_passed"],
             tests_failed=parsed["tests_failed"],
             coverage=coverage,
+            coverage_gaps=coverage_gaps,
         )
     
     def _fix_imports(self, test_code: str) -> str:
