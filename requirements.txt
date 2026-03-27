@@ -1,4 +1,4 @@
-# LLM Agent Platform - Phase 1 Dependencies
+# LLM Agent Platform - Phase 1 & 2 Dependencies
 
 # LangChain and LangGraph for orchestration
 langchain>=0.3.0
@@ -15,6 +15,11 @@ docker>=7.0.0
 # Testing frameworks
 pytest>=8.0.0
 coverage>=7.0.0
+pytest-cov>=4.0.0
+
+# SAST tools (Phase 2)
+semgrep>=1.60.0
+bandit>=1.7.0
 
 # CLI
 click>=8.0.0

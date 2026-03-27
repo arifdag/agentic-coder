@@ -61,6 +61,54 @@ class SandboxConfig(BaseModel):
         )
 
 
+class SastConfig(BaseModel):
+    """Configuration for the SAST gate."""
+
+    enabled: bool = Field(default=True, description="Enable SAST scanning")
+    semgrep_rules: str = Field(default="auto", description="Semgrep rule config")
+    bandit_enabled: bool = Field(default=True, description="Enable Bandit scanning")
+    timeout: int = Field(default=60, description="Tool timeout in seconds")
+
+    @classmethod
+    def from_env(cls) -> "SastConfig":
+        return cls(
+            enabled=os.getenv("SAST_ENABLED", "true").lower() == "true",
+            semgrep_rules=os.getenv("SEMGREP_RULES", "auto"),
+            bandit_enabled=os.getenv("BANDIT_ENABLED", "true").lower() == "true",
+            timeout=int(os.getenv("SAST_TIMEOUT", "60")),
+        )
+
+
+class DependencyConfig(BaseModel):
+    """Configuration for the dependency validation gate."""
+
+    enabled: bool = Field(default=True, description="Enable dependency validation")
+    pypi_timeout: int = Field(default=10, description="PyPI request timeout in seconds")
+
+    @classmethod
+    def from_env(cls) -> "DependencyConfig":
+        return cls(
+            enabled=os.getenv("DEPENDENCY_CHECK_ENABLED", "true").lower() == "true",
+            pypi_timeout=int(os.getenv("PYPI_TIMEOUT", "10")),
+        )
+
+
+class JudgeConfig(BaseModel):
+    """Configuration for the LLM-as-judge false-positive filter."""
+
+    enabled: bool = Field(default=True, description="Enable LLM judge for SAST findings")
+    provider: Optional[str] = Field(default=None, description="Override LLM provider for judge")
+    model: Optional[str] = Field(default=None, description="Override model for judge")
+
+    @classmethod
+    def from_env(cls) -> "JudgeConfig":
+        return cls(
+            enabled=os.getenv("JUDGE_ENABLED", "true").lower() == "true",
+            provider=os.getenv("JUDGE_PROVIDER"),
+            model=os.getenv("JUDGE_MODEL"),
+        )
+
+
 class PipelineConfig(BaseModel):
     """Configuration for the GDR pipeline."""
     
@@ -83,6 +131,9 @@ class Config(BaseModel):
     
     llm: LLMConfig = Field(default_factory=LLMConfig.from_env)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig.from_env)
+    sast: SastConfig = Field(default_factory=SastConfig.from_env)
+    dependency: DependencyConfig = Field(default_factory=DependencyConfig.from_env)
+    judge: JudgeConfig = Field(default_factory=JudgeConfig.from_env)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig.from_env)
     
     @classmethod
@@ -91,6 +142,9 @@ class Config(BaseModel):
         return cls(
             llm=LLMConfig.from_env(provider),
             sandbox=SandboxConfig.from_env(),
+            sast=SastConfig.from_env(),
+            dependency=DependencyConfig.from_env(),
+            judge=JudgeConfig.from_env(),
             pipeline=PipelineConfig.from_env(),
         )
 
