@@ -11,16 +11,13 @@ class TestRouterAgent:
     """Tests for the RouterAgent."""
     
     def setup_method(self):
-        """Set up test fixtures."""
         self.router = RouterAgent()
     
     def test_detect_python_by_extension(self):
-        """Test Python detection via file extension."""
         result = self.router.detect_language("some code", "test.py")
         assert result == Language.PYTHON
     
     def test_detect_python_by_syntax(self):
-        """Test Python detection via syntax patterns."""
         code = '''
 def hello():
     print("Hello, world!")
@@ -33,7 +30,6 @@ class MyClass:
         assert result == Language.PYTHON
     
     def test_detect_javascript_by_syntax(self):
-        """Test JavaScript detection via syntax patterns."""
         code = '''
 const hello = () => {
     console.log("Hello");
@@ -47,7 +43,6 @@ function greet(name) {
         assert result == Language.JAVASCRIPT
     
     def test_detect_typescript_by_syntax(self):
-        """Test TypeScript detection via type annotations."""
         code = '''
 interface User {
     name: string;
@@ -62,37 +57,30 @@ const greet = (user: User): string => {
         assert result == Language.TYPESCRIPT
     
     def test_classify_unit_test_task(self):
-        """Test unit test task classification."""
         result = self.router.classify_task("Generate unit tests for this function")
         assert result == TaskType.UNIT_TEST
     
     def test_classify_ui_test_task(self):
-        """Test UI test task classification."""
         result = self.router.classify_task("Create e2e tests with playwright")
         assert result == TaskType.UI_TEST
     
     def test_classify_explanation_task(self):
-        """Test explanation task classification."""
         result = self.router.classify_task("Explain what this code does")
         assert result == TaskType.EXPLANATION
     
     def test_route_python_unit_test(self):
-        """Test full routing for Python unit tests."""
         code = '''
 def add(a, b):
     return a + b
 '''
         result = self.router.route(code, "Generate tests", "utils.py")
-        
         assert result.language == Language.PYTHON
         assert result.task_type == TaskType.UNIT_TEST
         assert result.framework_hint == "pytest"
         assert result.confidence == 1.0
     
     def test_route_unknown_language(self):
-        """Test routing with unknown language."""
         result = self.router.route("random text", "test this")
-        
         assert result.language == Language.UNKNOWN
         assert result.confidence == 0.5
 
@@ -101,7 +89,6 @@ class TestUnitTestAgentParsing:
     """Tests for UnitTestAgent parsing methods."""
     
     def test_extract_test_functions(self):
-        """Test extraction of test function names."""
         code = '''
 def test_add_positive():
     assert add(1, 2) == 3
@@ -125,7 +112,6 @@ def test_add_zero():
         assert "helper_function" not in result
     
     def test_extract_imports(self):
-        """Test extraction of import statements."""
         code = '''
 import pytest
 from source_module import add, subtract
@@ -143,7 +129,6 @@ def test_something():
         assert "from source_module import add, subtract" in result
     
     def test_extract_code_from_markdown(self):
-        """Test extraction of code from markdown blocks."""
         response = '''
 Here are the tests:
 
@@ -168,17 +153,26 @@ class TestRepairContext:
     """Tests for RepairContext model."""
     
     def test_repair_context_creation(self):
-        """Test RepairContext model creation."""
         context = RepairContext(
             previous_code="def test(): pass",
             error_type="syntax_error",
             error_message="Invalid syntax",
             line_number=1,
         )
-        
         assert context.previous_code == "def test(): pass"
         assert context.error_type == "syntax_error"
         assert context.line_number == 1
+
+    def test_repair_context_with_coverage_gaps(self):
+        context = RepairContext(
+            previous_code="def test(): pass",
+            error_type="test_failure",
+            error_message="1 test failed",
+            coverage_gaps="12, 15-18, 23",
+            diagnostics="[GATE: sandbox] FAIL\n  - ERROR: 1 test(s) failed",
+        )
+        assert context.coverage_gaps == "12, 15-18, 23"
+        assert context.diagnostics is not None
 
 
 class TestIntegration:
@@ -186,9 +180,7 @@ class TestIntegration:
     
     @pytest.mark.skip(reason="Requires API key")
     def test_full_pipeline(self):
-        """Test the full pipeline end-to-end."""
         from src.graph.pipeline import run_pipeline
-        from src.config import Config
         
         code = '''
 def add(a: int, b: int) -> int:
