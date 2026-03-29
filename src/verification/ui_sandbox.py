@@ -149,20 +149,15 @@ class UITestExecutor:
                 mem_limit=self.config.memory_limit,
                 cpu_period=100000,
                 cpu_quota=100000,
-                remove=True,
-                detach=False,
-                stdout=True,
-                stderr=True,
+                detach=True,
             )
 
-            stdout = container.decode("utf-8") if isinstance(container, bytes) else str(container)
-            stderr = ""
-            exit_code = 0
+            result = container.wait(timeout=self.config.timeout)
+            exit_code = result.get("StatusCode", -1)
+            stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+            stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+            container.remove(force=True)
 
-        except docker.errors.ContainerError as e:
-            stdout = e.stderr.decode("utf-8") if e.stderr else ""
-            stderr = str(e)
-            exit_code = e.exit_status
         except Exception as e:
             return ExecutionResult(
                 success=False,

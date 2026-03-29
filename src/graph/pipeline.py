@@ -338,16 +338,16 @@ def create_pipeline(config: Optional[Config] = None):
             diagnostics = report.format_for_repair()
 
         if task_type == TaskType.UI_TEST.value:
-            ui_ctx = UIRepairContext(
+            ctx = UIRepairContext(
                 previous_code=state.get("generated_tests") or "",
                 error_type=state.get("error_type") or "unknown",
                 error_message=state.get("error_message") or "Unknown error",
                 line_number=None,
                 diagnostics=diagnostics,
             )
-            result = ui_test_agent.repair(ui_ctx)
+            result = ui_test_agent.repair(ctx)
         else:
-            repair_context = RepairContext(
+            ctx = RepairContext(
                 previous_code=state.get("generated_tests") or "",
                 error_type=state.get("error_type") or "unknown",
                 error_message=state.get("error_message") or "Unknown error",
@@ -355,14 +355,14 @@ def create_pipeline(config: Optional[Config] = None):
                 coverage_gaps=state.get("coverage_report"),
                 diagnostics=diagnostics,
             )
-            result = unit_test_agent.repair(repair_context)
+            result = unit_test_agent.repair(ctx)
 
         new_retry = state["retry_count"] + 1
         audit_entry = AuditEntry(
             iteration=new_retry + 1,
             timestamp=datetime.now().isoformat(),
             generated_artifact=result.test_code,
-            repair_context=repair_context.model_dump(),
+            repair_context=ctx.model_dump(),
         )
 
         return {
@@ -396,10 +396,7 @@ def create_pipeline(config: Optional[Config] = None):
     def should_repair(state: PipelineState) -> Literal["repair", "output"]:
         if state["verification_passed"]:
             return "output"
-        max_r = state["max_retries"]
-        if state.get("task_type") == TaskType.UI_TEST.value:
-            max_r = max(max_r, config.ui_test.retry_budget)
-        if state["retry_count"] >= max_r:
+        if state["retry_count"] >= state["max_retries"]:
             return "output"
         return "repair"
 
@@ -499,4 +496,8 @@ def run_pipeline(
         "status": "initialized",
     }
 
-    return pipeline.invoke(initial_state)
+    effective_retries = max_retries
+    if config and target_url is not None or html_content is not None:
+        effective_retries = max(max_retries, config.ui_test.retry_budget if config else 5)
+    recursion_limit = 8 + (effective_retries + 1) * 7
+    return pipeline.invoke(initial_state, {"recursion_limit": recursion_limit})
