@@ -2,8 +2,10 @@
 
 Phase 2: Multi-gate verification with SAST, dependency checks, LLM judge,
 sandboxed execution with coverage, and structured diagnostics.
+Phase 4: Code explanation with LLM-as-judge and AST complexity validation.
 """
 
+import json
 from typing import TypedDict, Optional, List, Literal
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -13,11 +15,14 @@ from pydantic import BaseModel
 from ..agents.router import RouterAgent, TaskType
 from ..agents.unit_test import UnitTestAgent, RepairContext
 from ..agents.ui_test import UITestAgent, UIRepairContext
+from ..agents.explanation import ExplanationAgent, ExplanationRepairContext
 from ..verification.sandbox import SandboxExecutor
 from ..verification.ui_sandbox import UITestExecutor
 from ..verification.sast import SastAnalyzer
 from ..verification.dependency import DependencyValidator
 from ..verification.judge import SastJudge
+from ..verification.explanation_judge import ExplanationJudge
+from ..verification.complexity import ComplexityValidator
 from ..verification.models import GateResult, VerificationReport, Finding, Severity
 from ..utils.logging import AuditLogger
 from ..config import Config, get_llm
@@ -51,6 +56,9 @@ class PipelineState(TypedDict):
     generated_tests: Optional[str]
     test_functions: Optional[List[str]]
 
+    # Explanation-specific (Phase 4)
+    generated_explanation: Optional[dict]
+
     # Multi-gate verification (Phase 2)
     gate_results: Optional[List[dict]]
     verification_report: Optional[dict]
@@ -82,6 +90,7 @@ def create_pipeline(config: Optional[Config] = None):
     router_agent = RouterAgent()
     unit_test_agent = UnitTestAgent(llm)
     ui_test_agent = UITestAgent(llm)
+    explanation_agent = ExplanationAgent(llm)
     sandbox = SandboxExecutor(config.sandbox)
     ui_sandbox = UITestExecutor(config.ui_test)
     audit_logger = AuditLogger(config.pipeline.audit_log_dir)
@@ -106,6 +115,9 @@ def create_pipeline(config: Optional[Config] = None):
 
     sast_judge = SastJudge(judge_llm) if config.judge.enabled else None
 
+    explanation_judge = ExplanationJudge(judge_llm) if config.explanation.judge_enabled else None
+    complexity_validator = ComplexityValidator() if config.explanation.complexity_check_enabled else None
+
     # ── Nodes ──────────────────────────────────────────────────────────
 
     def router_node(state: PipelineState) -> PipelineState:
@@ -123,6 +135,29 @@ def create_pipeline(config: Optional[Config] = None):
 
     def generate_node(state: PipelineState) -> PipelineState:
         task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+
+        if task_type == TaskType.EXPLANATION.value:
+            expl = explanation_agent.generate(
+                code=state["code_input"],
+                file_path=state.get("file_path"),
+            )
+            expl_dict = expl.model_dump()
+            expl_md = expl.to_markdown()
+
+            audit_entry = AuditEntry(
+                iteration=state["retry_count"] + 1,
+                timestamp=datetime.now().isoformat(),
+                generated_artifact=expl_md,
+            )
+
+            return {
+                **state,
+                "generated_tests": expl_md,
+                "generated_explanation": expl_dict,
+                "test_functions": [],
+                "audit_log": state["audit_log"] + [audit_entry.model_dump()],
+                "status": "generated",
+            }
 
         if task_type == TaskType.UNIT_TEST.value:
             result = unit_test_agent.generate(
@@ -162,7 +197,18 @@ def create_pipeline(config: Optional[Config] = None):
 
         SAST is skipped for UI tests because Semgrep/Bandit rules target
         application code, not Playwright test scripts.
+        Explanations bypass static analysis entirely.
         """
+        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+
+        if task_type == TaskType.EXPLANATION.value:
+            return {
+                **state,
+                "gate_results": [],
+                "verification_passed": True,
+                "status": "static_checked",
+            }
+
         if not state.get("generated_tests"):
             return {
                 **state,
@@ -173,7 +219,6 @@ def create_pipeline(config: Optional[Config] = None):
                 "status": "verification_failed",
             }
 
-        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
         is_ui = task_type == TaskType.UI_TEST.value
 
         test_code = state["generated_tests"]
@@ -210,7 +255,28 @@ def create_pipeline(config: Optional[Config] = None):
         }
 
     def judge_node(state: PipelineState) -> PipelineState:
-        """Run LLM judge on SAST findings to filter false positives."""
+        """Run LLM judge: SAST triage for tests, rubric evaluation for explanations."""
+        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+
+        if task_type == TaskType.EXPLANATION.value:
+            if not explanation_judge:
+                return state
+            expl_dict = state.get("generated_explanation")
+            if not expl_dict:
+                return state
+            expl_json = json.dumps(expl_dict, indent=2)
+            judge_gate = explanation_judge.verify(state["code_input"], expl_json)
+
+            prior_gates = state.get("gate_results") or []
+            all_gates = prior_gates + [judge_gate.model_dump()]
+
+            return {
+                **state,
+                "gate_results": all_gates,
+                "verification_passed": judge_gate.passed,
+                "status": "judged",
+            }
+
         if not sast_judge or not state.get("gate_results"):
             return state
 
@@ -240,8 +306,32 @@ def create_pipeline(config: Optional[Config] = None):
         }
 
     def verify_sandbox_node(state: PipelineState) -> PipelineState:
-        """Run Gate 3: sandbox execution with coverage (unit) or Playwright (UI)."""
+        """Run Gate 3: sandbox execution (unit), Playwright (UI), or complexity validation (explanation)."""
         task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+
+        if task_type == TaskType.EXPLANATION.value:
+            if not complexity_validator:
+                noop_gate = GateResult(gate_name="complexity", passed=True, findings=[],
+                                       details="Complexity validation disabled")
+                prior_gates = state.get("gate_results") or []
+                return {
+                    **state,
+                    "gate_results": prior_gates + [noop_gate.model_dump()],
+                    "status": "sandbox_checked",
+                }
+            expl_dict = state.get("generated_explanation") or {}
+            complexity = expl_dict.get("complexity", {})
+            time_claim = complexity.get("time", "O(?)")
+            space_claim = complexity.get("space", "O(?)")
+            cx_gate = complexity_validator.validate(state["code_input"], time_claim, space_claim)
+
+            prior_gates = state.get("gate_results") or []
+            return {
+                **state,
+                "gate_results": prior_gates + [cx_gate.model_dump()],
+                "status": "sandbox_checked",
+            }
+
         test_code = state["generated_tests"] or ""
 
         if task_type == TaskType.UI_TEST.value:
@@ -337,6 +427,52 @@ def create_pipeline(config: Optional[Config] = None):
             report = VerificationReport(**report_data)
             diagnostics = report.format_for_repair()
 
+        if task_type == TaskType.EXPLANATION.value:
+            expl_dict = state.get("generated_explanation") or {}
+            expl_json = json.dumps(expl_dict, indent=2)
+
+            judge_feedback = None
+            complexity_feedback = None
+            raw_gates = state.get("gate_results") or []
+            for g_data in raw_gates:
+                g = GateResult(**g_data)
+                if g.gate_name == "explanation_judge" and not g.passed and explanation_judge:
+                    judge_feedback = explanation_judge.format_feedback(g)
+                if g.gate_name == "complexity" and not g.passed and complexity_validator:
+                    complexity_feedback = complexity_validator.format_feedback(g)
+
+            expl_ctx = ExplanationRepairContext(
+                previous_explanation=expl_json,
+                error_type=state.get("error_type") or "verification_failed",
+                error_message=state.get("error_message") or "Explanation failed verification",
+                judge_feedback=judge_feedback,
+                complexity_feedback=complexity_feedback,
+            )
+            repaired = explanation_agent.repair(expl_ctx)
+            repaired_dict = repaired.model_dump()
+            repaired_md = repaired.to_markdown()
+
+            new_retry = state["retry_count"] + 1
+            audit_entry = AuditEntry(
+                iteration=new_retry + 1,
+                timestamp=datetime.now().isoformat(),
+                generated_artifact=repaired_md,
+                repair_context=expl_ctx.model_dump(),
+            )
+
+            return {
+                **state,
+                "generated_tests": repaired_md,
+                "generated_explanation": repaired_dict,
+                "test_functions": [],
+                "retry_count": new_retry,
+                "gate_results": None,
+                "verification_report": None,
+                "coverage_report": None,
+                "audit_log": state["audit_log"] + [audit_entry.model_dump()],
+                "status": "repaired",
+            }
+
         if task_type == TaskType.UI_TEST.value:
             ctx = UIRepairContext(
                 previous_code=state.get("generated_tests") or "",
@@ -378,12 +514,22 @@ def create_pipeline(config: Optional[Config] = None):
         }
 
     def output_node(state: PipelineState) -> PipelineState:
+        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+
         if state["verification_passed"]:
-            final_output = state["generated_tests"]
             status = "success"
         else:
-            final_output = state.get("generated_tests")
             status = "failed_after_retries"
+
+        if task_type == TaskType.EXPLANATION.value:
+            expl_dict = state.get("generated_explanation")
+            if expl_dict:
+                from ..agents.explanation import CodeExplanation
+                final_output = CodeExplanation(**expl_dict).to_markdown()
+            else:
+                final_output = state.get("generated_tests")
+        else:
+            final_output = state.get("generated_tests") if state["verification_passed"] else state.get("generated_tests")
 
         audit_logger.save(state["audit_log"], state.get("file_path", "unknown"))
 
@@ -482,6 +628,7 @@ def run_pipeline(
         "task_type": None,
         "generated_tests": None,
         "test_functions": None,
+        "generated_explanation": None,
         "gate_results": None,
         "verification_report": None,
         "coverage_report": None,

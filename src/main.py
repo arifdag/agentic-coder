@@ -61,9 +61,9 @@ def cli():
 )
 @click.option(
     "--task-type", "-t",
-    type=click.Choice(["unit_test", "ui_test"]),
+    type=click.Choice(["unit_test", "ui_test", "explanation"]),
     default=None,
-    help="Test type (default: auto-detect from request)",
+    help="Task type (default: auto-detect from request)",
 )
 @click.option(
     "--url", "-u",
@@ -92,12 +92,16 @@ def generate(
     logger = ConsoleLogger(verbose=verbose)
 
     is_ui = task_type == "ui_test"
+    is_explanation = task_type == "explanation"
 
     if is_ui and not url and not file:
         console.print("[red]UI tests require --url or --file (HTML).[/red]")
         sys.exit(1)
-    if not is_ui and not file:
+    if not is_ui and not is_explanation and not file:
         console.print("[red]Unit tests require --file.[/red]")
+        sys.exit(1)
+    if is_explanation and not file:
+        console.print("[red]Explanation requires --file.[/red]")
         sys.exit(1)
 
     source_code = ""
@@ -134,7 +138,10 @@ def generate(
 
     logger.step("Configuration loaded", f"Provider: {config.llm.provider}, Model: {config.llm.model}")
 
-    if is_ui:
+    if is_explanation:
+        user_request = "Explain this code with complexity analysis"
+        default_retries = config.explanation.max_retries
+    elif is_ui:
         user_request = description or "Generate Playwright E2E tests"
         if "ui" not in user_request.lower() and "playwright" not in user_request.lower():
             user_request = f"Generate Playwright E2E tests: {user_request}"
@@ -175,17 +182,23 @@ def generate(
         summary=f"Iterations: {iterations}, Tests: {len(result.get('test_functions', []))}",
     )
 
-    if tests_generated:
+    final_output = result.get("final_output") or tests_generated
+
+    if final_output:
         if output:
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(tests_generated, encoding="utf-8")
-            console.print(f"\n[green]Tests written to {output}[/green]")
+            output.write_text(final_output, encoding="utf-8")
+            console.print(f"\n[green]Output written to {output}[/green]")
+        elif is_explanation:
+            from rich.markdown import Markdown as RichMarkdown
+            console.print("\n[bold]Code Explanation:[/bold]\n")
+            console.print(RichMarkdown(final_output))
         else:
             console.print("\n[bold]Generated Tests:[/bold]\n")
-            syntax = Syntax(tests_generated, "python", theme="monokai", line_numbers=True)
+            syntax = Syntax(final_output, "python", theme="monokai", line_numbers=True)
             console.print(syntax)
     else:
-        console.print("[red]No tests were generated[/red]")
+        console.print("[red]No output was generated[/red]")
 
     if verbose:
         _print_summary(result)
