@@ -1,0 +1,26 @@
+# LLM Agent Platform - Playwright Sandbox Environment
+# Isolated container for running generated Playwright E2E tests
+
+FROM mcr.microsoft.com/playwright/python:v1.51.0-noble
+
+RUN groupadd -r sandbox 2>/dev/null || true && \
+    useradd -r -g sandbox -d /home/sandbox -s /sbin/nologin sandbox 2>/dev/null || true
+
+RUN pip install --no-cache-dir \
+    pytest>=8.0.0 \
+    pytest-playwright>=0.5.0 \
+    playwright==1.51.0
+
+RUN playwright install --with-deps chromium
+
+COPY docker/entrypoint-pw.sh /usr/local/bin/entrypoint-pw.sh
+RUN chmod +x /usr/local/bin/entrypoint-pw.sh
+
+WORKDIR /workspace
+
+RUN mkdir -p /home/sandbox && chown -R sandbox:sandbox /workspace /home/sandbox
+
+USER sandbox
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-pw.sh"]
+CMD ["pytest", "-v", "--tb=short", "--browser", "chromium", "test_generated.py"]
