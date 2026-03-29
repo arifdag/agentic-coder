@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sample Todo App</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 1rem; }
+    form { display: flex; gap: .5rem; margin-bottom: 1rem; }
+    input[type="text"] { flex: 1; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: .5rem 1rem; border: none; border-radius: 4px; cursor: pointer; background: #3b82f6; color: #fff; }
+    button:hover { background: #2563eb; }
+    ul { list-style: none; }
+    li { display: flex; align-items: center; gap: .5rem; padding: .5rem 0; border-bottom: 1px solid #eee; }
+    li.done span { text-decoration: line-through; color: #999; }
+    .delete-btn { margin-left: auto; background: #ef4444; font-size: .8rem; padding: .25rem .5rem; }
+    .count { margin-top: 1rem; color: #666; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>Todo List</h1>
+
+  <form id="todo-form" data-testid="todo-form">
+    <input type="text" id="todo-input" data-testid="todo-input"
+           placeholder="What needs to be done?" aria-label="New todo" required>
+    <button type="submit" data-testid="add-btn">Add</button>
+  </form>
+
+  <ul id="todo-list" data-testid="todo-list" role="list"></ul>
+
+  <p class="count" data-testid="todo-count">0 items</p>
+
+  <script>
+    const form = document.getElementById('todo-form');
+    const input = document.getElementById('todo-input');
+    const list  = document.getElementById('todo-list');
+    const count = document.querySelector('[data-testid="todo-count"]');
+
+    function updateCount() {
+      const total = list.children.length;
+      const done  = list.querySelectorAll('.done').length;
+      count.textContent = `${total - done} of ${total} items remaining`;
+    }
+
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+
+      const li = document.createElement('li');
+      li.setAttribute('role', 'listitem');
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.setAttribute('aria-label', `Mark "${text}" as done`);
+      cb.addEventListener('change', () => {
+        li.classList.toggle('done', cb.checked);
+        updateCount();
+      });
+
+      const span = document.createElement('span');
+      span.textContent = text;
+
+      const del = document.createElement('button');
+      del.textContent = 'Delete';
+      del.className = 'delete-btn';
+      del.setAttribute('aria-label', `Delete "${text}"`);
+      del.addEventListener('click', () => { li.remove(); updateCount(); });
+
+      li.append(cb, span, del);
+      list.appendChild(li);
+      input.value = '';
+      updateCount();
+    });
+  </script>
+</body>
+</html>

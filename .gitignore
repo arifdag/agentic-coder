@@ -51,7 +51,3 @@ sandbox_workdir/
 # Temporary files
 tmp/
 temp/
-
-# Project documents (not tracked in repo)
-deep_research_report.md
-Paper.tex
