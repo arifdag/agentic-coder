@@ -109,6 +109,32 @@ class JudgeConfig(BaseModel):
         )
 
 
+class UITestConfig(BaseModel):
+    """Configuration for the Playwright UI test sandbox."""
+
+    enabled: bool = Field(default=True, description="Enable UI test generation")
+    playwright_image: str = Field(
+        default="llm-agent-playwright", description="Docker image for Playwright sandbox"
+    )
+    timeout: int = Field(default=120, description="Execution timeout in seconds")
+    retry_budget: int = Field(default=5, description="Max repair iterations for UI tests")
+    headless: bool = Field(default=True, description="Run browser in headless mode")
+    network_enabled: bool = Field(default=True, description="Allow network access (needed for URL targets)")
+    memory_limit: str = Field(default="1g", description="Container memory limit")
+
+    @classmethod
+    def from_env(cls) -> "UITestConfig":
+        return cls(
+            enabled=os.getenv("UI_TEST_ENABLED", "true").lower() == "true",
+            playwright_image=os.getenv("PLAYWRIGHT_IMAGE", "llm-agent-playwright"),
+            timeout=int(os.getenv("UI_TEST_TIMEOUT", "120")),
+            retry_budget=int(os.getenv("UI_TEST_RETRY_BUDGET", "5")),
+            headless=os.getenv("UI_TEST_HEADLESS", "true").lower() == "true",
+            network_enabled=os.getenv("UI_TEST_NETWORK", "true").lower() == "true",
+            memory_limit=os.getenv("UI_TEST_MEMORY_LIMIT", "1g"),
+        )
+
+
 class PipelineConfig(BaseModel):
     """Configuration for the GDR pipeline."""
     
@@ -134,6 +160,7 @@ class Config(BaseModel):
     sast: SastConfig = Field(default_factory=SastConfig.from_env)
     dependency: DependencyConfig = Field(default_factory=DependencyConfig.from_env)
     judge: JudgeConfig = Field(default_factory=JudgeConfig.from_env)
+    ui_test: UITestConfig = Field(default_factory=UITestConfig.from_env)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig.from_env)
     
     @classmethod
@@ -145,6 +172,7 @@ class Config(BaseModel):
             sast=SastConfig.from_env(),
             dependency=DependencyConfig.from_env(),
             judge=JudgeConfig.from_env(),
+            ui_test=UITestConfig.from_env(),
             pipeline=PipelineConfig.from_env(),
         )
 

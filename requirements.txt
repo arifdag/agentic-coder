@@ -21,6 +21,10 @@ pytest-cov>=4.0.0
 semgrep>=1.60.0
 bandit>=1.7.0
 
+# Playwright E2E testing (Phase 3)
+playwright>=1.51.0
+pytest-playwright>=0.5.0
+
 # CLI
 click>=8.0.0
 
