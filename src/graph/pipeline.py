@@ -12,7 +12,9 @@ from pydantic import BaseModel
 
 from ..agents.router import RouterAgent, TaskType
 from ..agents.unit_test import UnitTestAgent, RepairContext
+from ..agents.ui_test import UITestAgent, UIRepairContext
 from ..verification.sandbox import SandboxExecutor
+from ..verification.ui_sandbox import UITestExecutor
 from ..verification.sast import SastAnalyzer
 from ..verification.dependency import DependencyValidator
 from ..verification.judge import SastJudge
@@ -37,6 +39,11 @@ class PipelineState(TypedDict):
     code_input: str
     file_path: Optional[str]
     user_request: str
+
+    # UI-test specific inputs
+    target_url: Optional[str]
+    html_content: Optional[str]
+    description: Optional[str]
 
     routing_decision: Optional[dict]
     task_type: Optional[str]
@@ -74,7 +81,9 @@ def create_pipeline(config: Optional[Config] = None):
     llm = get_llm(config.llm)
     router_agent = RouterAgent()
     unit_test_agent = UnitTestAgent(llm)
+    ui_test_agent = UITestAgent(llm)
     sandbox = SandboxExecutor(config.sandbox)
+    ui_sandbox = UITestExecutor(config.ui_test)
     audit_logger = AuditLogger(config.pipeline.audit_log_dir)
 
     sast_analyzer = SastAnalyzer(
@@ -120,6 +129,13 @@ def create_pipeline(config: Optional[Config] = None):
                 code=state["code_input"],
                 file_path=state.get("file_path"),
             )
+        elif task_type == TaskType.UI_TEST.value:
+            ui_result = ui_test_agent.generate(
+                description=state.get("description") or state.get("user_request", ""),
+                target_url=state.get("target_url"),
+                html_content=state.get("html_content"),
+            )
+            result = ui_result
         else:
             return {
                 **state,
@@ -142,7 +158,11 @@ def create_pipeline(config: Optional[Config] = None):
         }
 
     def verify_static_node(state: PipelineState) -> PipelineState:
-        """Run Gate 1 (SAST) and Gate 2 (dependency) concurrently."""
+        """Run Gate 1 (SAST) and Gate 2 (dependency) concurrently.
+
+        SAST is skipped for UI tests because Semgrep/Bandit rules target
+        application code, not Playwright test scripts.
+        """
         if not state.get("generated_tests"):
             return {
                 **state,
@@ -153,11 +173,16 @@ def create_pipeline(config: Optional[Config] = None):
                 "status": "verification_failed",
             }
 
+        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+        is_ui = task_type == TaskType.UI_TEST.value
+
         test_code = state["generated_tests"]
         source_and_test = state["code_input"] + "\n\n" + test_code
-        gate_results: List[dict] = []
 
         def run_sast():
+            if is_ui:
+                return GateResult(gate_name="sast", passed=True, findings=[],
+                                  details="Skipped for UI tests")
             if sast_analyzer:
                 return sast_analyzer.analyze(source_and_test)
             return GateResult(gate_name="sast", passed=True, findings=[])
@@ -215,14 +240,22 @@ def create_pipeline(config: Optional[Config] = None):
         }
 
     def verify_sandbox_node(state: PipelineState) -> PipelineState:
-        """Run Gate 3: sandbox execution with coverage."""
-        source_code = state["code_input"]
+        """Run Gate 3: sandbox execution with coverage (unit) or Playwright (UI)."""
+        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
         test_code = state["generated_tests"] or ""
 
-        result = sandbox.execute(
-            source_code=source_code,
-            test_code=test_code,
-        )
+        if task_type == TaskType.UI_TEST.value:
+            result = ui_sandbox.execute(
+                test_code=test_code,
+                target_url=state.get("target_url"),
+                html_content=state.get("html_content"),
+            )
+        else:
+            source_code = state["code_input"]
+            result = sandbox.execute(
+                source_code=source_code,
+                test_code=test_code,
+            )
 
         sandbox_gate = GateResult(
             gate_name="sandbox",
@@ -296,22 +329,33 @@ def create_pipeline(config: Optional[Config] = None):
         }
 
     def repair_node(state: PipelineState) -> PipelineState:
+        task_type = state.get("task_type", TaskType.UNIT_TEST.value)
+
         report_data = state.get("verification_report")
         diagnostics = None
         if report_data:
             report = VerificationReport(**report_data)
             diagnostics = report.format_for_repair()
 
-        repair_context = RepairContext(
-            previous_code=state.get("generated_tests") or "",
-            error_type=state.get("error_type") or "unknown",
-            error_message=state.get("error_message") or "Unknown error",
-            line_number=None,
-            coverage_gaps=state.get("coverage_report"),
-            diagnostics=diagnostics,
-        )
-
-        result = unit_test_agent.repair(repair_context)
+        if task_type == TaskType.UI_TEST.value:
+            ui_ctx = UIRepairContext(
+                previous_code=state.get("generated_tests") or "",
+                error_type=state.get("error_type") or "unknown",
+                error_message=state.get("error_message") or "Unknown error",
+                line_number=None,
+                diagnostics=diagnostics,
+            )
+            result = ui_test_agent.repair(ui_ctx)
+        else:
+            repair_context = RepairContext(
+                previous_code=state.get("generated_tests") or "",
+                error_type=state.get("error_type") or "unknown",
+                error_message=state.get("error_message") or "Unknown error",
+                line_number=None,
+                coverage_gaps=state.get("coverage_report"),
+                diagnostics=diagnostics,
+            )
+            result = unit_test_agent.repair(repair_context)
 
         new_retry = state["retry_count"] + 1
         audit_entry = AuditEntry(
@@ -352,7 +396,10 @@ def create_pipeline(config: Optional[Config] = None):
     def should_repair(state: PipelineState) -> Literal["repair", "output"]:
         if state["verification_passed"]:
             return "output"
-        if state["retry_count"] >= state["max_retries"]:
+        max_r = state["max_retries"]
+        if state.get("task_type") == TaskType.UI_TEST.value:
+            max_r = max(max_r, config.ui_test.retry_budget)
+        if state["retry_count"] >= max_r:
             return "output"
         return "repair"
 
@@ -416,14 +463,24 @@ def run_pipeline(
     file_path: Optional[str] = None,
     max_retries: int = 3,
     config: Optional[Config] = None,
+    target_url: Optional[str] = None,
+    html_content: Optional[str] = None,
+    description: Optional[str] = None,
 ) -> PipelineState:
-    """Run the pipeline on input code."""
+    """Run the pipeline on input code.
+
+    For UI tests, pass ``target_url`` or ``html_content`` and a natural-language
+    ``description`` of the user flows to test.
+    """
     pipeline = create_pipeline(config)
 
     initial_state: PipelineState = {
         "code_input": code,
         "file_path": file_path,
         "user_request": user_request,
+        "target_url": target_url,
+        "html_content": html_content,
+        "description": description,
         "routing_decision": None,
         "task_type": None,
         "generated_tests": None,

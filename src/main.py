@@ -27,8 +27,8 @@ def cli():
 @click.option(
     "--file", "-f",
     type=click.Path(exists=True, path_type=Path),
-    required=True,
-    help="Path to Python file to generate tests for",
+    default=None,
+    help="Path to source file (Python for unit tests, HTML for UI tests)",
 )
 @click.option(
     "--output", "-o",
@@ -39,8 +39,8 @@ def cli():
 @click.option(
     "--max-retries", "-r",
     type=int,
-    default=3,
-    help="Maximum repair iterations (default: 3)",
+    default=None,
+    help="Maximum repair iterations (default: 3 for unit, 5 for UI)",
 )
 @click.option(
     "--verbose", "-v",
@@ -59,6 +59,24 @@ def cli():
     default=None,
     help="Model name to use (default: from env)",
 )
+@click.option(
+    "--task-type", "-t",
+    type=click.Choice(["unit_test", "ui_test"]),
+    default=None,
+    help="Test type (default: auto-detect from request)",
+)
+@click.option(
+    "--url", "-u",
+    type=str,
+    default=None,
+    help="Target URL for UI tests (live web application)",
+)
+@click.option(
+    "--description", "-d",
+    type=str,
+    default=None,
+    help="Natural-language test description (used for UI tests)",
+)
 def generate(
     file: Path,
     output: Path,
@@ -66,20 +84,42 @@ def generate(
     verbose: bool,
     provider: str,
     model: str,
+    task_type: str,
+    url: str,
+    description: str,
 ):
-    """Generate unit tests for a Python file."""
+    """Generate tests for source code or web applications."""
     logger = ConsoleLogger(verbose=verbose)
-    
-    logger.start(f"Generating tests for {file}")
-    
-    try:
-        source_code = file.read_text(encoding="utf-8")
-    except Exception as e:
-        console.print(f"[red]Error reading file: {e}[/red]")
+
+    is_ui = task_type == "ui_test"
+
+    if is_ui and not url and not file:
+        console.print("[red]UI tests require --url or --file (HTML).[/red]")
         sys.exit(1)
-    
-    logger.info(f"Read {len(source_code)} characters from {file}")
-    
+    if not is_ui and not file:
+        console.print("[red]Unit tests require --file.[/red]")
+        sys.exit(1)
+
+    source_code = ""
+    html_content = None
+    file_path_str = None
+
+    if file:
+        try:
+            source_code = file.read_text(encoding="utf-8")
+        except Exception as e:
+            console.print(f"[red]Error reading file: {e}[/red]")
+            sys.exit(1)
+        file_path_str = str(file)
+        logger.start(f"Generating tests for {file}")
+        logger.info(f"Read {len(source_code)} characters from {file}")
+
+        if is_ui and file.suffix in (".html", ".htm"):
+            html_content = source_code
+            source_code = ""
+    elif url:
+        logger.start(f"Generating UI tests for {url}")
+
     try:
         config = Config.load(provider=provider)
         if model:
@@ -91,36 +131,50 @@ def generate(
         console.print("  1. Copy .env.example to .env")
         console.print("  2. Add your Groq API key (get one free at https://console.groq.com/)")
         sys.exit(1)
-    
+
     logger.step("Configuration loaded", f"Provider: {config.llm.provider}, Model: {config.llm.model}")
-    
+
+    if is_ui:
+        user_request = description or "Generate Playwright E2E tests"
+        if "ui" not in user_request.lower() and "playwright" not in user_request.lower():
+            user_request = f"Generate Playwright E2E tests: {user_request}"
+        default_retries = config.ui_test.retry_budget
+    else:
+        user_request = "Generate comprehensive unit tests"
+        default_retries = 3
+
+    retries = max_retries if max_retries is not None else default_retries
+
     try:
         logger.step("Running pipeline...")
-        
+
         result = run_pipeline(
             code=source_code,
-            user_request="Generate comprehensive unit tests",
-            file_path=str(file),
-            max_retries=max_retries,
+            user_request=user_request,
+            file_path=file_path_str,
+            max_retries=retries,
             config=config,
+            target_url=url,
+            html_content=html_content,
+            description=description,
         )
-        
+
     except Exception as e:
         console.print(f"[red]Pipeline error: {e}[/red]")
         if verbose:
             import traceback
             traceback.print_exc()
         sys.exit(1)
-    
+
     success = result["status"] == "success"
     iterations = result["retry_count"] + 1
     tests_generated = result.get("generated_tests")
-    
+
     logger.end(
         success=success,
         summary=f"Iterations: {iterations}, Tests: {len(result.get('test_functions', []))}",
     )
-    
+
     if tests_generated:
         if output:
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -132,10 +186,10 @@ def generate(
             console.print(syntax)
     else:
         console.print("[red]No tests were generated[/red]")
-    
+
     if verbose:
         _print_summary(result)
-    
+
     if not success:
         console.print(f"\n[yellow]Warning: Tests may not be fully verified[/yellow]")
         if result.get("error_message"):
