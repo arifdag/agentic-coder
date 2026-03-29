@@ -5,6 +5,8 @@ from .ui_sandbox import UITestExecutor
 from .sast import SastAnalyzer
 from .dependency import DependencyValidator
 from .judge import SastJudge
+from .explanation_judge import ExplanationJudge
+from .complexity import ComplexityValidator
 from .models import GateResult, Finding, VerificationReport, Severity, JudgeVerdict
 
 __all__ = [
@@ -14,6 +16,8 @@ __all__ = [
     "SastAnalyzer",
     "DependencyValidator",
     "SastJudge",
+    "ExplanationJudge",
+    "ComplexityValidator",
     "GateResult",
     "Finding",
     "VerificationReport",

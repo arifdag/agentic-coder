@@ -135,6 +135,24 @@ class UITestConfig(BaseModel):
         )
 
 
+class ExplanationConfig(BaseModel):
+    """Configuration for the Code Explanation Agent."""
+
+    enabled: bool = Field(default=True, description="Enable code explanation generation")
+    max_retries: int = Field(default=2, description="Max repair iterations for explanations")
+    judge_enabled: bool = Field(default=True, description="Enable LLM judge for explanations")
+    complexity_check_enabled: bool = Field(default=True, description="Enable AST complexity validation")
+
+    @classmethod
+    def from_env(cls) -> "ExplanationConfig":
+        return cls(
+            enabled=os.getenv("EXPLANATION_ENABLED", "true").lower() == "true",
+            max_retries=int(os.getenv("EXPLANATION_MAX_RETRIES", "2")),
+            judge_enabled=os.getenv("EXPLANATION_JUDGE_ENABLED", "true").lower() == "true",
+            complexity_check_enabled=os.getenv("EXPLANATION_COMPLEXITY_CHECK", "true").lower() == "true",
+        )
+
+
 class PipelineConfig(BaseModel):
     """Configuration for the GDR pipeline."""
     
@@ -161,6 +179,7 @@ class Config(BaseModel):
     dependency: DependencyConfig = Field(default_factory=DependencyConfig.from_env)
     judge: JudgeConfig = Field(default_factory=JudgeConfig.from_env)
     ui_test: UITestConfig = Field(default_factory=UITestConfig.from_env)
+    explanation: ExplanationConfig = Field(default_factory=ExplanationConfig.from_env)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig.from_env)
     
     @classmethod
@@ -173,6 +192,7 @@ class Config(BaseModel):
             dependency=DependencyConfig.from_env(),
             judge=JudgeConfig.from_env(),
             ui_test=UITestConfig.from_env(),
+            explanation=ExplanationConfig.from_env(),
             pipeline=PipelineConfig.from_env(),
         )
 
