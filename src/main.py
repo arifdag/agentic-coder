@@ -28,7 +28,7 @@ def cli():
     "--file", "-f",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to source file (Python for unit tests, HTML for UI tests)",
+    help="Path to source file (Python, JS/TS for unit tests, HTML for UI tests)",
 )
 @click.option(
     "--output", "-o",
@@ -184,6 +184,9 @@ def generate(
 
     final_output = result.get("final_output") or tests_generated
 
+    detected_lang = (result.get("routing_decision") or {}).get("language", "python")
+    syntax_lang = "javascript" if detected_lang in ("javascript", "typescript") else "python"
+
     if final_output:
         if output:
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +198,7 @@ def generate(
             console.print(RichMarkdown(final_output))
         else:
             console.print("\n[bold]Generated Tests:[/bold]\n")
-            syntax = Syntax(final_output, "python", theme="monokai", line_numbers=True)
+            syntax = Syntax(final_output, syntax_lang, theme="monokai", line_numbers=True)
             console.print(syntax)
     else:
         console.print("[red]No output was generated[/red]")

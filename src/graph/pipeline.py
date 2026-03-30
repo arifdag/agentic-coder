@@ -3,6 +3,7 @@
 Phase 2: Multi-gate verification with SAST, dependency checks, LLM judge,
 sandboxed execution with coverage, and structured diagnostics.
 Phase 4: Code explanation with LLM-as-judge and AST complexity validation.
+Phase 5: Multi-language support (JS/TS via Jest).
 """
 
 import json
@@ -12,12 +13,14 @@ from concurrent.futures import ThreadPoolExecutor
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 
-from ..agents.router import RouterAgent, TaskType
+from ..agents.router import RouterAgent, TaskType, Language
 from ..agents.unit_test import UnitTestAgent, RepairContext
 from ..agents.ui_test import UITestAgent, UIRepairContext
+from ..agents.jest_test import JestTestAgent
 from ..agents.explanation import ExplanationAgent, ExplanationRepairContext
 from ..verification.sandbox import SandboxExecutor
 from ..verification.ui_sandbox import UITestExecutor
+from ..verification.js_sandbox import JsSandboxExecutor
 from ..verification.sast import SastAnalyzer
 from ..verification.dependency import DependencyValidator
 from ..verification.judge import SastJudge
@@ -26,6 +29,8 @@ from ..verification.complexity import ComplexityValidator
 from ..verification.models import GateResult, VerificationReport, Finding, Severity
 from ..utils.logging import AuditLogger
 from ..config import Config, get_llm
+
+JS_LANGUAGES = {Language.JAVASCRIPT.value, Language.TYPESCRIPT.value}
 
 
 class AuditEntry(BaseModel):
@@ -52,6 +57,7 @@ class PipelineState(TypedDict):
 
     routing_decision: Optional[dict]
     task_type: Optional[str]
+    language: Optional[str]
 
     generated_tests: Optional[str]
     test_functions: Optional[List[str]]
@@ -89,9 +95,11 @@ def create_pipeline(config: Optional[Config] = None):
     llm = get_llm(config.llm)
     router_agent = RouterAgent()
     unit_test_agent = UnitTestAgent(llm)
+    jest_test_agent = JestTestAgent(llm)
     ui_test_agent = UITestAgent(llm)
     explanation_agent = ExplanationAgent(llm)
     sandbox = SandboxExecutor(config.sandbox)
+    js_sandbox = JsSandboxExecutor(config.js_sandbox)
     ui_sandbox = UITestExecutor(config.ui_test)
     audit_logger = AuditLogger(config.pipeline.audit_log_dir)
 
@@ -130,6 +138,7 @@ def create_pipeline(config: Optional[Config] = None):
             **state,
             "routing_decision": routing.model_dump(),
             "task_type": routing.task_type.value,
+            "language": state.get("language") or routing.language.value,
             "status": "routed",
         }
 
@@ -160,10 +169,17 @@ def create_pipeline(config: Optional[Config] = None):
             }
 
         if task_type == TaskType.UNIT_TEST.value:
-            result = unit_test_agent.generate(
-                code=state["code_input"],
-                file_path=state.get("file_path"),
-            )
+            lang = state.get("language", Language.PYTHON.value)
+            if lang in JS_LANGUAGES:
+                result = jest_test_agent.generate(
+                    code=state["code_input"],
+                    file_path=state.get("file_path"),
+                )
+            else:
+                result = unit_test_agent.generate(
+                    code=state["code_input"],
+                    file_path=state.get("file_path"),
+                )
         elif task_type == TaskType.UI_TEST.value:
             ui_result = ui_test_agent.generate(
                 description=state.get("description") or state.get("user_request", ""),
@@ -220,6 +236,7 @@ def create_pipeline(config: Optional[Config] = None):
             }
 
         is_ui = task_type == TaskType.UI_TEST.value
+        lang = state.get("language", Language.PYTHON.value)
 
         test_code = state["generated_tests"]
         source_and_test = state["code_input"] + "\n\n" + test_code
@@ -229,12 +246,12 @@ def create_pipeline(config: Optional[Config] = None):
                 return GateResult(gate_name="sast", passed=True, findings=[],
                                   details="Skipped for UI tests")
             if sast_analyzer:
-                return sast_analyzer.analyze(source_and_test)
+                return sast_analyzer.analyze(source_and_test, language=lang)
             return GateResult(gate_name="sast", passed=True, findings=[])
 
         def run_deps():
             if dep_validator:
-                return dep_validator.validate(test_code)
+                return dep_validator.validate(test_code, language=lang)
             return GateResult(gate_name="dependency", passed=True, findings=[])
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -333,12 +350,19 @@ def create_pipeline(config: Optional[Config] = None):
             }
 
         test_code = state["generated_tests"] or ""
+        lang = state.get("language", Language.PYTHON.value)
 
         if task_type == TaskType.UI_TEST.value:
             result = ui_sandbox.execute(
                 test_code=test_code,
                 target_url=state.get("target_url"),
                 html_content=state.get("html_content"),
+            )
+        elif lang in JS_LANGUAGES:
+            source_code = state["code_input"]
+            result = js_sandbox.execute(
+                source_code=source_code,
+                test_code=test_code,
             )
         else:
             source_code = state["code_input"]
@@ -473,6 +497,8 @@ def create_pipeline(config: Optional[Config] = None):
                 "status": "repaired",
             }
 
+        lang = state.get("language", Language.PYTHON.value)
+
         if task_type == TaskType.UI_TEST.value:
             ctx = UIRepairContext(
                 previous_code=state.get("generated_tests") or "",
@@ -491,7 +517,10 @@ def create_pipeline(config: Optional[Config] = None):
                 coverage_gaps=state.get("coverage_report"),
                 diagnostics=diagnostics,
             )
-            result = unit_test_agent.repair(ctx)
+            if lang in JS_LANGUAGES:
+                result = jest_test_agent.repair(ctx)
+            else:
+                result = unit_test_agent.repair(ctx)
 
         new_retry = state["retry_count"] + 1
         audit_entry = AuditEntry(
@@ -626,6 +655,7 @@ def run_pipeline(
         "description": description,
         "routing_decision": None,
         "task_type": None,
+        "language": None,
         "generated_tests": None,
         "test_functions": None,
         "generated_explanation": None,
