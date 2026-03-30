@@ -135,6 +135,26 @@ class UITestConfig(BaseModel):
         )
 
 
+class JsSandboxConfig(BaseModel):
+    """Configuration for the Node.js/Jest sandbox."""
+
+    enabled: bool = Field(default=True, description="Enable JS/TS test generation")
+    image_name: str = Field(default="llm-agent-node", description="Docker image for Node sandbox")
+    timeout: int = Field(default=60, description="Execution timeout in seconds")
+    memory_limit: str = Field(default="512m", description="Container memory limit")
+    network_disabled: bool = Field(default=True, description="Disable network access")
+
+    @classmethod
+    def from_env(cls) -> "JsSandboxConfig":
+        return cls(
+            enabled=os.getenv("JS_SANDBOX_ENABLED", "true").lower() == "true",
+            image_name=os.getenv("JS_SANDBOX_IMAGE", "llm-agent-node"),
+            timeout=int(os.getenv("JS_SANDBOX_TIMEOUT", "60")),
+            memory_limit=os.getenv("JS_SANDBOX_MEMORY_LIMIT", "512m"),
+            network_disabled=os.getenv("JS_SANDBOX_NETWORK_DISABLED", "true").lower() == "true",
+        )
+
+
 class ExplanationConfig(BaseModel):
     """Configuration for the Code Explanation Agent."""
 
@@ -179,6 +199,7 @@ class Config(BaseModel):
     dependency: DependencyConfig = Field(default_factory=DependencyConfig.from_env)
     judge: JudgeConfig = Field(default_factory=JudgeConfig.from_env)
     ui_test: UITestConfig = Field(default_factory=UITestConfig.from_env)
+    js_sandbox: JsSandboxConfig = Field(default_factory=JsSandboxConfig.from_env)
     explanation: ExplanationConfig = Field(default_factory=ExplanationConfig.from_env)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig.from_env)
     
@@ -192,6 +213,7 @@ class Config(BaseModel):
             dependency=DependencyConfig.from_env(),
             judge=JudgeConfig.from_env(),
             ui_test=UITestConfig.from_env(),
+            js_sandbox=JsSandboxConfig.from_env(),
             explanation=ExplanationConfig.from_env(),
             pipeline=PipelineConfig.from_env(),
         )
