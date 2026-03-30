@@ -1,0 +1,17 @@
+# LLM Agent Platform - Node.js Sandbox Environment
+# Secure, isolated container for running Jest tests
+
+FROM node:20-slim
+
+RUN groupadd -r sandbox 2>/dev/null || true && \
+    useradd -r -g sandbox -d /home/sandbox -s /sbin/nologin sandbox 2>/dev/null || true
+
+RUN npm install -g jest@29
+
+WORKDIR /workspace
+
+RUN mkdir -p /home/sandbox && chown -R sandbox:sandbox /workspace /home/sandbox
+
+USER sandbox
+
+CMD ["npx", "jest", "--verbose", "--no-cache"]
