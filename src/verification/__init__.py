@@ -2,6 +2,7 @@
 
 from .sandbox import SandboxExecutor, ExecutionResult
 from .ui_sandbox import UITestExecutor
+from .js_sandbox import JsSandboxExecutor
 from .sast import SastAnalyzer
 from .dependency import DependencyValidator
 from .judge import SastJudge
@@ -13,6 +14,7 @@ __all__ = [
     "SandboxExecutor",
     "ExecutionResult",
     "UITestExecutor",
+    "JsSandboxExecutor",
     "SastAnalyzer",
     "DependencyValidator",
     "SastJudge",
