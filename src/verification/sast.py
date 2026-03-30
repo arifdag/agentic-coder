@@ -138,16 +138,36 @@ class SastAnalyzer:
 
         return findings
 
-    def analyze(self, code: str, filename: str = "generated_code.py") -> GateResult:
+    def _filename_for_language(self, language: Optional[str]) -> str:
+        """Pick a file extension that matches the source language."""
+        if language in ("javascript", "js"):
+            return "generated_code.js"
+        if language in ("typescript", "ts"):
+            return "generated_code.ts"
+        return "generated_code.py"
+
+    def _is_python(self, filename: str) -> bool:
+        return filename.endswith(".py")
+
+    def analyze(
+        self,
+        code: str,
+        filename: str = "generated_code.py",
+        language: Optional[str] = None,
+    ) -> GateResult:
         """Run SAST analysis on code.
 
         Args:
-            code: Python code to analyze
+            code: Source code to analyze
             filename: Virtual filename for context
+            language: Optional language hint (python, javascript, typescript)
 
         Returns:
-            GateResult with findings from Semgrep and Bandit
+            GateResult with findings from Semgrep and (for Python) Bandit
         """
+        if language:
+            filename = self._filename_for_language(language)
+
         tmpdir = Path(tempfile.mkdtemp(prefix="sast_"))
         file_path = tmpdir / filename
 
@@ -155,7 +175,10 @@ class SastAnalyzer:
             file_path.write_text(code, encoding="utf-8")
 
             semgrep_findings = self._run_semgrep(file_path)
-            bandit_findings = self._run_bandit(file_path)
+
+            bandit_findings = (
+                self._run_bandit(file_path) if self._is_python(filename) else []
+            )
 
             all_findings = semgrep_findings + bandit_findings
 
