@@ -1,0 +1,15 @@
+{
+  "description": "Code snippets with phantom (non-existent) package imports to test DependencyValidator catch rate.",
+  "cases": [
+    {"file": "phantom_py_1.py", "language": "python", "phantom_packages": ["superturboparser"], "valid_packages": ["os", "json"]},
+    {"file": "phantom_py_2.py", "language": "python", "phantom_packages": ["fasthelpers"], "valid_packages": ["requests"]},
+    {"file": "phantom_py_3.py", "language": "python", "phantom_packages": ["numpyextras"], "valid_packages": []},
+    {"file": "phantom_py_4.py", "language": "python", "phantom_packages": ["pandaz"], "valid_packages": []},
+    {"file": "phantom_py_5.py", "language": "python", "phantom_packages": ["aioreactor", "blazeutils"], "valid_packages": []},
+    {"file": "phantom_js_1.js", "language": "javascript", "phantom_packages": ["ultravalidator"], "valid_packages": ["express"]},
+    {"file": "phantom_js_2.js", "language": "javascript", "phantom_packages": ["@superlib/renderer"], "valid_packages": []},
+    {"file": "phantom_js_3.js", "language": "javascript", "phantom_packages": ["fastcache", "nodeaccel"], "valid_packages": []},
+    {"file": "clean_py.py", "language": "python", "phantom_packages": [], "valid_packages": ["os", "json", "sys"]},
+    {"file": "clean_js.js", "language": "javascript", "phantom_packages": [], "valid_packages": ["path", "fs"]}
+  ]
+}

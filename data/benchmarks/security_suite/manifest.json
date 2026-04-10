@@ -1,0 +1,17 @@
+{
+  "description": "Curated code snippets with known security vulnerabilities for SAST + judge evaluation.",
+  "cases": [
+    {"file": "sql_injection.py", "language": "python", "cwe": "CWE-89", "vuln": "SQL injection via string concatenation"},
+    {"file": "path_traversal.py", "language": "python", "cwe": "CWE-22", "vuln": "Path traversal via unsanitized filename"},
+    {"file": "eval_injection.py", "language": "python", "cwe": "CWE-95", "vuln": "Code injection via eval()"},
+    {"file": "command_injection.py", "language": "python", "cwe": "CWE-78", "vuln": "OS command injection via shell=True"},
+    {"file": "hardcoded_secret.py", "language": "python", "cwe": "CWE-798", "vuln": "Hardcoded credentials in source"},
+    {"file": "xss_flask.py", "language": "python", "cwe": "CWE-79", "vuln": "Reflected XSS via unsanitized output"},
+    {"file": "insecure_deserialization.py", "language": "python", "cwe": "CWE-502", "vuln": "Insecure deserialization with pickle"},
+    {"file": "weak_hash.py", "language": "python", "cwe": "CWE-328", "vuln": "Weak hash algorithm (MD5) for passwords"},
+    {"file": "open_redirect.py", "language": "python", "cwe": "CWE-601", "vuln": "Unvalidated redirect URL"},
+    {"file": "ssrf.py", "language": "python", "cwe": "CWE-918", "vuln": "Server-side request forgery"},
+    {"file": "prototype_pollution.js", "language": "javascript", "cwe": "CWE-1321", "vuln": "Prototype pollution via recursive merge"},
+    {"file": "js_eval.js", "language": "javascript", "cwe": "CWE-95", "vuln": "Code injection via eval()"}
+  ]
+}
