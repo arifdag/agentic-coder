@@ -352,6 +352,95 @@ def logs(limit: int):
     console.print(table)
 
 
+BENCHMARK_CHOICES = [
+    "ult", "projecttest", "cweval", "codejudgebench",
+    "security", "dep_hallucination", "all",
+]
+
+
+@cli.command()
+@click.option("--benchmark", "-b", type=click.Choice(BENCHMARK_CHOICES), required=True, help="Benchmark to evaluate")
+@click.option("--max-cases", "-n", type=int, default=None, help="Max cases to run")
+@click.option("--output-dir", "-o", type=str, default=None, help="Results directory")
+@click.option("--provider", type=click.Choice(["groq", "openrouter"]), default=None)
+@click.option("--verbose", "-v", is_flag=True)
+def evaluate(benchmark, max_cases, output_dir, provider, verbose):
+    """Run the pipeline against a benchmark dataset."""
+    from .config import Config
+    from .evaluation.benchmarks import get_dataset
+    from .evaluation.runner import BenchmarkRunner
+
+    config = Config.load(provider=provider)
+    config.pipeline.verbose = verbose
+    results_dir = output_dir or config.evaluation.results_dir
+    max_cases = max_cases or config.evaluation.max_cases
+
+    if benchmark == "all":
+        names = [n for n in BENCHMARK_CHOICES if n != "all"]
+    else:
+        names = [benchmark]
+
+    for name in names:
+        console.print(f"\n[bold]Running benchmark: {name}[/bold]")
+        ds = get_dataset(name, data_dir=Path(config.evaluation.data_dir))
+        runner = BenchmarkRunner(config=config, dataset=ds, results_dir=results_dir)
+        runner.run(max_cases=max_cases)
+        runner.save_summary()
+        metrics = runner.summarize()
+        from rich.markdown import Markdown as RichMarkdown
+        console.print(RichMarkdown(metrics.to_markdown()))
+
+
+@cli.command()
+@click.option("--benchmark", "-b", type=click.Choice(BENCHMARK_CHOICES), required=True)
+@click.option("--max-cases", "-n", type=int, default=None)
+@click.option("--axes", "-a", type=str, default="sast,dependency,judge,retries", help="Comma-separated ablation axes")
+@click.option("--output-dir", "-o", type=str, default=None)
+@click.option("--provider", type=click.Choice(["groq", "openrouter"]), default=None)
+@click.option("--verbose", "-v", is_flag=True)
+def ablation(benchmark, max_cases, axes, output_dir, provider, verbose):
+    """Run ablation studies across config variants."""
+    from .config import Config
+    from .evaluation.benchmarks import get_dataset
+    from .evaluation.ablation import AblationRunner
+
+    config = Config.load(provider=provider)
+    config.pipeline.verbose = verbose
+    results_dir = output_dir or config.evaluation.results_dir
+
+    axes_list = [a.strip() for a in axes.split(",")]
+
+    if benchmark == "all":
+        names = [n for n in BENCHMARK_CHOICES if n != "all"]
+    else:
+        names = [benchmark]
+
+    for name in names:
+        console.print(f"\n[bold]Ablation on: {name}[/bold]")
+        ds = get_dataset(name, data_dir=Path(config.evaluation.data_dir))
+        runner = AblationRunner(base_config=config, dataset=ds, results_dir=results_dir)
+        variant_metrics = runner.run_all(max_cases_per_variant=max_cases, axes=axes_list)
+        console.print(f"[green]Completed {len(variant_metrics)} variants.[/green]")
+
+
+@cli.command(name="cost-analysis")
+@click.option("--log-dir", type=str, default="audit_logs", help="Audit log directory")
+@click.option("--token-rate", type=int, default=4, help="Characters per token estimate")
+@click.option("--cost-per-million", type=float, default=0.0, help="Cost in USD per million tokens")
+def cost_analysis(log_dir, token_rate, cost_per_million):
+    """Analyze audit logs for cost and token usage estimates."""
+    from .evaluation.cost import CostAnalyzer
+
+    analyzer = CostAnalyzer(
+        log_dir=log_dir,
+        chars_per_token=token_rate,
+        cost_per_million_tokens=cost_per_million,
+    )
+    md = analyzer.to_markdown()
+    from rich.markdown import Markdown as RichMarkdown
+    console.print(RichMarkdown(md))
+
+
 def main():
     """Main entry point."""
     cli()

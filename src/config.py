@@ -173,6 +173,25 @@ class ExplanationConfig(BaseModel):
         )
 
 
+class EvalConfig(BaseModel):
+    """Configuration for Phase 6 evaluation / benchmarking."""
+
+    data_dir: str = Field(default="data/benchmarks", description="Root directory for benchmark data")
+    results_dir: str = Field(default="eval_results", description="Directory for evaluation outputs")
+    max_cases: Optional[int] = Field(default=None, description="Cap on benchmark cases per run")
+    parallel: int = Field(default=1, description="Parallel workers (reserved for future use)")
+
+    @classmethod
+    def from_env(cls) -> "EvalConfig":
+        max_cases_raw = os.getenv("EVAL_MAX_CASES")
+        return cls(
+            data_dir=os.getenv("EVAL_DATA_DIR", "data/benchmarks"),
+            results_dir=os.getenv("EVAL_RESULTS_DIR", "eval_results"),
+            max_cases=int(max_cases_raw) if max_cases_raw else None,
+            parallel=int(os.getenv("EVAL_PARALLEL", "1")),
+        )
+
+
 class PipelineConfig(BaseModel):
     """Configuration for the GDR pipeline."""
     
@@ -201,6 +220,7 @@ class Config(BaseModel):
     ui_test: UITestConfig = Field(default_factory=UITestConfig.from_env)
     js_sandbox: JsSandboxConfig = Field(default_factory=JsSandboxConfig.from_env)
     explanation: ExplanationConfig = Field(default_factory=ExplanationConfig.from_env)
+    evaluation: EvalConfig = Field(default_factory=EvalConfig.from_env)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig.from_env)
     
     @classmethod
@@ -215,6 +235,7 @@ class Config(BaseModel):
             ui_test=UITestConfig.from_env(),
             js_sandbox=JsSandboxConfig.from_env(),
             explanation=ExplanationConfig.from_env(),
+            evaluation=EvalConfig.from_env(),
             pipeline=PipelineConfig.from_env(),
         )
 
