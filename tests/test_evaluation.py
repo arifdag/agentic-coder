@@ -3,10 +3,16 @@
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from src.config import EvalConfig
+from src.evaluation.ablation import generate_variants
+from src.evaluation.benchmarks import get_dataset
+from src.evaluation.benchmarks.custom_security import CustomSecurityDataset
+from src.evaluation.benchmarks.dep_hallucination import DepHallucinationDataset
+from src.evaluation.cost import CostAnalyzer
 from src.evaluation.models import (
     AblationConfig,
     BenchmarkCase,
@@ -14,13 +20,6 @@ from src.evaluation.models import (
     EvalMetrics,
     EvalResult,
 )
-from src.evaluation.benchmarks.custom_security import CustomSecurityDataset
-from src.evaluation.benchmarks.dep_hallucination import DepHallucinationDataset
-from src.evaluation.benchmarks import get_dataset
-from src.evaluation.ablation import generate_variants
-from src.evaluation.cost import CostAnalyzer
-from src.config import EvalConfig
-
 
 # ── Model tests ───────────────────────────────────────────────────────
 
@@ -43,6 +42,8 @@ class TestEvalResult:
         assert r.passed is False
         assert r.error is None
         assert r.gate_results == []
+        assert r.coverage_metrics == {}
+        assert r.mutation_metrics == {}
 
     def test_full_result(self):
         r = EvalResult(
@@ -54,9 +55,13 @@ class TestEvalResult:
             coverage=87.5,
             iterations=2,
             gate_results=[{"gate_name": "sast", "passed": True}],
+            coverage_metrics={"target_line_coverage": 90.0},
+            mutation_metrics={"mutants_killed": 3, "mutants_survived": 1},
         )
         assert r.passed
         assert r.coverage == 87.5
+        assert r.coverage_metrics["target_line_coverage"] == 90.0
+        assert r.mutation_metrics["mutants_killed"] == 3
 
 
 class TestEvalMetrics:
@@ -67,10 +72,20 @@ class TestEvalMetrics:
 
     def test_from_results(self):
         results = [
-            EvalResult(case_id="a", passed=True, elapsed_seconds=1.0, iterations=2,
-                       gate_results=[{"gate_name": "sast", "passed": True}]),
-            EvalResult(case_id="b", passed=False, elapsed_seconds=3.0, iterations=4,
-                       gate_results=[{"gate_name": "sast", "passed": False}]),
+            EvalResult(
+                case_id="a",
+                passed=True,
+                elapsed_seconds=1.0,
+                iterations=2,
+                gate_results=[{"gate_name": "sast", "passed": True}],
+            ),
+            EvalResult(
+                case_id="b",
+                passed=False,
+                elapsed_seconds=3.0,
+                iterations=4,
+                gate_results=[{"gate_name": "sast", "passed": False}],
+            ),
         ]
         m = EvalMetrics.from_results(results, dataset_name="test")
         assert m.total == 2
@@ -81,9 +96,119 @@ class TestEvalMetrics:
         assert m.avg_time == 2.0
         assert m.gate_pass_rates["sast"] == 0.5
 
+    def test_from_results_research_quality_metrics(self):
+        results = [
+            EvalResult(
+                case_id="a",
+                passed=True,
+                coverage=80.0,
+                coverage_metrics={
+                    "line_coverage": 80.0,
+                    "branch_coverage": 50.0,
+                    "target_line_coverage": 90.0,
+                    "target_branch_coverage": 75.0,
+                },
+                mutation_metrics={
+                    "mutants_killed": 4,
+                    "mutants_survived": 1,
+                    "mutants_uncovered": 1,
+                },
+                relevance_metrics={"relevance_pass": True, "gaming_flag": False},
+                reliability_metrics={"reliable": True, "flaky": False},
+                oracle_metrics={"has_assertions": True, "assertion_count": 4, "test_count": 2},
+                safety_metrics={"expected_vulnerable": True, "vulnerability_detected": True},
+                dependency_metrics={"expected_phantom": True, "phantom_detected": True},
+            ),
+            EvalResult(
+                case_id="b",
+                passed=False,
+                error="Error code: 429 rate limit",
+                quality={"provider_error": True},
+                coverage_metrics={
+                    "line_coverage": 40.0,
+                    "branch_coverage": 25.0,
+                    "target_line_coverage": 50.0,
+                    "target_branch_coverage": 25.0,
+                },
+                mutation_metrics={"mutants_killed": 1, "mutants_survived": 4},
+                relevance_metrics={"relevance_pass": False, "gaming_flag": True},
+                reliability_metrics={"reliable": False, "flaky": True},
+                oracle_metrics={"has_assertions": False, "assertion_count": 0, "test_count": 1},
+                safety_metrics={"expected_vulnerable": True, "vulnerability_detected": False},
+                dependency_metrics={"expected_clean": True, "clean_accepted": True},
+            ),
+        ]
+
+        m = EvalMetrics.from_results(results, dataset_name="quality")
+
+        assert m.provider_error_count == 1
+        assert m.clean_total == 1
+        assert m.clean_pass_rate == 1.0
+        assert m.avg_line_coverage == 60.0
+        assert m.avg_branch_coverage == 37.5
+        assert m.avg_target_line_coverage == 70.0
+        assert m.avg_target_branch_coverage == 50.0
+        assert m.mutation_score == pytest.approx(5 / 10)
+        assert m.mutation_coverage == pytest.approx(10 / 11)
+        assert m.relevance_pass_rate == 0.5
+        assert m.gaming_rate == 0.5
+        assert m.reliability_rate == 0.5
+        assert m.flakiness_rate == 0.5
+        assert m.assertion_presence_rate == 0.5
+        assert m.avg_assertions_per_test == pytest.approx(4 / 3)
+        assert m.sast_catch_rate == 0.5
+        assert m.vulnerability_escape_rate == 0.5
+        assert m.dependency_phantom_detection_rate == 1.0
+        assert m.dependency_clean_acceptance_rate == 1.0
+
+    def test_quality_denominators_ignore_clean_unlabeled_cases(self):
+        results = [
+            EvalResult(
+                case_id="vuln",
+                safety_metrics={"expected_vulnerable": True, "vulnerability_detected": True},
+                dependency_metrics={"expected_phantom": True, "phantom_detected": True},
+            ),
+            EvalResult(
+                case_id="clean",
+                safety_metrics={"expected_vulnerable": False, "vulnerability_detected": False},
+                dependency_metrics={
+                    "expected_phantom": False,
+                    "phantom_detected": False,
+                    "expected_clean": False,
+                    "clean_accepted": False,
+                },
+            ),
+        ]
+
+        m = EvalMetrics.from_results(results, dataset_name="quality")
+
+        assert m.sast_catch_rate == 1.0
+        assert m.dependency_phantom_detection_rate == 1.0
+        assert m.dependency_clean_acceptance_rate is None
+
+    def test_provider_errors_fall_back_to_pipeline_error_text(self):
+        result = EvalResult(
+            case_id="rate_limited",
+            passed=False,
+            quality={"provider_error": False},
+            pipeline_state={"error_message": "Error code: 429 rate limit"},
+        )
+
+        m = EvalMetrics.from_results([result], dataset_name="quality")
+
+        assert m.provider_error_count == 1
+        assert m.clean_total == 0
+
     def test_to_markdown(self):
-        m = EvalMetrics(dataset_name="demo", total=10, passed=7, failed=3, pass_rate=0.7,
-                        avg_iterations=2.1, avg_time=1.5)
+        m = EvalMetrics(
+            dataset_name="demo",
+            total=10,
+            passed=7,
+            failed=3,
+            pass_rate=0.7,
+            avg_iterations=2.1,
+            avg_time=1.5,
+        )
         md = m.to_markdown()
         assert "demo" in md
         assert "70.0%" in md
@@ -188,13 +313,9 @@ class TestProjectTestLoader:
             "mypkg",
             {
                 "a.py": "def a(): return 1\n",  # no future import
-                "b.py": (
-                    "from __future__ import unicode_literals\n"
-                    "def b(): return 2\n"
-                ),
+                "b.py": ("from __future__ import unicode_literals\n" "def b(): return 2\n"),
                 "c.py": (
-                    "from __future__ import absolute_import, division\n"
-                    "def c(): return 3\n"
+                    "from __future__ import absolute_import, division\n" "def c(): return 3\n"
                 ),
             },
         )
@@ -213,6 +334,7 @@ class TestProjectTestLoader:
         assert "unicode_literals" in first_line
         # And the combined source must actually be parseable
         import ast
+
         ast.parse(combined)
 
     def test_external_imports_are_preserved(self, tmp_path):
@@ -464,14 +586,36 @@ class TestEvalConfig:
         assert cfg.results_dir == "eval_results"
         assert cfg.max_cases is None
         assert cfg.parallel == 1
+        assert cfg.quality_mode == "fast"
+        assert cfg.mutation_max_mutants == 25
+        assert cfg.reliability_repeats == 0
 
     def test_from_env(self):
-        with patch.dict("os.environ", {
-            "EVAL_DATA_DIR": "/custom/data",
-            "EVAL_RESULTS_DIR": "/custom/results",
-            "EVAL_MAX_CASES": "50",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "EVAL_DATA_DIR": "/custom/data",
+                "EVAL_RESULTS_DIR": "/custom/results",
+                "EVAL_MAX_CASES": "50",
+                "EVAL_QUALITY_MODE": "full",
+                "EVAL_MUTATION_MAX_MUTANTS": "12",
+                "EVAL_RELIABILITY_REPEATS": "3",
+            },
+        ):
             cfg = EvalConfig.from_env()
             assert cfg.data_dir == "/custom/data"
             assert cfg.results_dir == "/custom/results"
             assert cfg.max_cases == 50
+            assert cfg.quality_mode == "full"
+            assert cfg.mutation_max_mutants == 12
+            assert cfg.reliability_repeats == 3
+
+    def test_quality_config_normalization(self):
+        cfg = EvalConfig(
+            quality_mode="bad",
+            mutation_max_mutants=-5,
+            reliability_repeats=-1,
+        )
+        assert cfg.quality_mode == "fast"
+        assert cfg.mutation_max_mutants == 0
+        assert cfg.reliability_repeats == 0

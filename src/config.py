@@ -5,7 +5,7 @@ pipeline can survive free-tier rate limits by rotating to a backup provider.
 """
 
 import os
-from typing import Optional, List, Dict, Any
+from typing import Any, ClassVar, Dict, List, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -159,8 +159,7 @@ class LLMConfig(BaseModel):
         )
 
     @classmethod
-    def from_spec(cls, spec: str, temperature: float = 0.1,
-                  max_tokens: int = 8192) -> "LLMConfig":
+    def from_spec(cls, spec: str, temperature: float = 0.1, max_tokens: int = 8192) -> "LLMConfig":
         """Build config from a 'provider:model' spec string.
 
         Examples:
@@ -214,9 +213,7 @@ class RoleConfig(BaseModel):
         """Return a JSON-serializable description for audit logs/papers."""
         return {
             "primary": {"provider": self.primary.provider, "model": self.primary.model},
-            "fallbacks": [
-                {"provider": f.provider, "model": f.model} for f in self.fallbacks
-            ],
+            "fallbacks": [{"provider": f.provider, "model": f.model} for f in self.fallbacks],
         }
 
 
@@ -285,6 +282,7 @@ class RelevanceConfig(BaseModel):
     function under test. Disabled by default to preserve baseline
     behaviour; enable for evaluations where benchmark gaming is a
     concern (e.g. ULT). See ``src/verification/relevance.py``."""
+
     enabled: bool = Field(default=False)
     source_module: str = Field(default="source_module")
     min_signals: int = Field(default=1)
@@ -350,7 +348,8 @@ class ExplanationConfig(BaseModel):
             enabled=os.getenv("EXPLANATION_ENABLED", "true").lower() == "true",
             max_retries=int(os.getenv("EXPLANATION_MAX_RETRIES", "2")),
             judge_enabled=os.getenv("EXPLANATION_JUDGE_ENABLED", "true").lower() == "true",
-            complexity_check_enabled=os.getenv("EXPLANATION_COMPLEXITY_CHECK", "true").lower() == "true",
+            complexity_check_enabled=os.getenv("EXPLANATION_COMPLEXITY_CHECK", "true").lower()
+            == "true",
         )
 
 
@@ -360,6 +359,26 @@ class EvalConfig(BaseModel):
     max_cases: Optional[int] = None
     parallel: int = Field(default=1)
 
+    quality_mode: str = Field(default="fast")
+    mutation_max_mutants: int = Field(default=25)
+    reliability_repeats: int = Field(default=0)
+
+    _QUALITY_MODES: ClassVar[tuple[str, ...]] = ("off", "fast", "full")
+
+    @classmethod
+    def _normalize_quality_mode(cls, v: str) -> str:
+        value = str(v or "fast").lower()
+        if value not in cls._QUALITY_MODES:
+            return "fast"
+        return value
+
+    def model_post_init(self, __context: Any) -> None:
+        self.quality_mode = self._normalize_quality_mode(self.quality_mode)
+        if self.mutation_max_mutants < 0:
+            self.mutation_max_mutants = 0
+        if self.reliability_repeats < 0:
+            self.reliability_repeats = 0
+
     @classmethod
     def from_env(cls) -> "EvalConfig":
         max_cases_raw = os.getenv("EVAL_MAX_CASES")
@@ -368,6 +387,9 @@ class EvalConfig(BaseModel):
             results_dir=os.getenv("EVAL_RESULTS_DIR", "eval_results"),
             max_cases=int(max_cases_raw) if max_cases_raw else None,
             parallel=int(os.getenv("EVAL_PARALLEL", "1")),
+            quality_mode=os.getenv("EVAL_QUALITY_MODE", "fast"),
+            mutation_max_mutants=int(os.getenv("EVAL_MUTATION_MAX_MUTANTS", "25")),
+            reliability_repeats=int(os.getenv("EVAL_RELIABILITY_REPEATS", "0")),
         )
 
 
@@ -440,8 +462,9 @@ def _build_role_configs(
     legacy_provider = provider_override or os.getenv("LLM_PROVIDER", "groq")
     legacy_llm = LLMConfig.from_env(legacy_provider)
 
-    def _role_from_env(primary_prov_key: str, primary_model_key: str,
-                       fallback_key: str) -> Optional[RoleConfig]:
+    def _role_from_env(
+        primary_prov_key: str, primary_model_key: str, fallback_key: str
+    ) -> Optional[RoleConfig]:
         provider = os.getenv(primary_prov_key)
         if not provider:
             return None  # role not configured via new-style env
@@ -463,12 +486,8 @@ def _build_role_configs(
 
         return RoleConfig(primary=primary, fallbacks=fallbacks)
 
-    coding_role = _role_from_env(
-        "CODING_PROVIDER", "CODING_MODEL", "CODING_FALLBACKS"
-    )
-    judge_role = _role_from_env(
-        "JUDGE_PROVIDER", "JUDGE_MODEL", "JUDGE_FALLBACKS"
-    )
+    coding_role = _role_from_env("CODING_PROVIDER", "CODING_MODEL", "CODING_FALLBACKS")
+    judge_role = _role_from_env("JUDGE_PROVIDER", "JUDGE_MODEL", "JUDGE_FALLBACKS")
 
     # If new-style env isn't set, synthesize a one-endpoint RoleConfig from
     # the legacy llm config so downstream code can always use role-based API.
@@ -502,6 +521,7 @@ def get_llm(config: Optional[LLMConfig] = None):
 
     if api_type == "groq":
         from langchain_groq import ChatGroq
+
         return ChatGroq(
             model=config.model,
             api_key=config.api_key,
@@ -513,8 +533,7 @@ def get_llm(config: Optional[LLMConfig] = None):
         base_url = config.base_url or profile.get("base_url")
         if not base_url:
             raise ValueError(
-                f"Provider '{config.provider}' requires base_url "
-                f"(set OPENAI_COMPAT_BASE_URL)"
+                f"Provider '{config.provider}' requires base_url " f"(set OPENAI_COMPAT_BASE_URL)"
             )
         return _build_openai_compat_chat(
             api_key=config.api_key,
@@ -528,9 +547,9 @@ def get_llm(config: Optional[LLMConfig] = None):
     raise ValueError(f"Unknown api_type '{api_type}' for provider '{config.provider}'")
 
 
-def _build_openai_compat_chat(api_key: str, base_url: str, model: str,
-                              temperature: float, max_tokens: int,
-                              provider_tag: str):
+def _build_openai_compat_chat(
+    api_key: str, base_url: str, model: str, temperature: float, max_tokens: int, provider_tag: str
+):
     """Generic OpenAI-compatible chat model (works for Gemini, Cerebras,
     Mistral, SambaNova, OpenRouter, GitHub Models, custom self-hosted, ...)."""
     from langchain_core.language_models.chat_models import BaseChatModel
@@ -588,9 +607,7 @@ def _build_openai_compat_chat(api_key: str, base_url: str, model: str,
             data = response.json()
             content = data["choices"][0]["message"]["content"]
 
-            return ChatResult(
-                generations=[ChatGeneration(message=AIMessage(content=content))]
-            )
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
     return OpenAICompatChat(
         api_key=api_key,
@@ -618,10 +635,10 @@ _PROVIDER_COOLDOWN: _Dict[str, float] = {}
 _COOLDOWN_LOCK = _threading.Lock()
 
 # Per-error-class default cooldowns (seconds)
-_COOLDOWN_RATE_LIMIT = 45.0    # 429 with no Retry-After -> wait ~1 min
-_COOLDOWN_SERVER = 20.0         # 5xx / timeout
-_COOLDOWN_AUTH = 3600.0         # 401/403 -> don't retry this session
-_COOLDOWN_NOT_FOUND = 3600.0    # 404 (wrong model id) -> don't retry
+_COOLDOWN_RATE_LIMIT = 45.0  # 429 with no Retry-After -> wait ~1 min
+_COOLDOWN_SERVER = 20.0  # 5xx / timeout
+_COOLDOWN_AUTH = 3600.0  # 401/403 -> don't retry this session
+_COOLDOWN_NOT_FOUND = 3600.0  # 404 (wrong model id) -> don't retry
 
 
 def _cooldown_key(provider: str, model: str) -> str:
@@ -645,6 +662,7 @@ def _set_cooldown(key: str, seconds: float) -> None:
 def _extract_retry_after(exc: BaseException) -> Optional[float]:
     """Pull Retry-After (seconds) from an httpx.HTTPStatusError if present."""
     import httpx
+
     if not isinstance(exc, httpx.HTTPStatusError):
         return None
     header = exc.response.headers.get("Retry-After") or exc.response.headers.get("retry-after")
@@ -662,6 +680,7 @@ def _classify_and_cooldown(cfg: "LLMConfig", exc: BaseException) -> str:
     Returns one of: 'rate_limit', 'server', 'auth', 'not_found', 'other'.
     """
     import httpx
+
     key = _cooldown_key(cfg.provider, cfg.model)
 
     status = None
@@ -712,7 +731,12 @@ def _classify_and_cooldown(cfg: "LLMConfig", exc: BaseException) -> str:
     if status in (401, 403) or "unauthorized" in msg:
         _set_cooldown(key, _COOLDOWN_AUTH)
         return "auth"
-    if status == 404 or "model_not_found" in msg or "does not exist" in msg or "no endpoints found" in msg:
+    if (
+        status == 404
+        or "model_not_found" in msg
+        or "does not exist" in msg
+        or "no endpoints found" in msg
+    ):
         _set_cooldown(key, _COOLDOWN_NOT_FOUND)
         return "not_found"
     return "other"
@@ -731,18 +755,22 @@ def _should_rotate(exc: BaseException) -> bool:
     Does NOT rotate on genuine client-side bugs like 400 with "invalid request".
     """
     import httpx
+
     # Transient network/connection problems: rotate to next fallback so a
     # single stalled provider doesn't fail the whole case.
-    if isinstance(exc, (
-        httpx.TimeoutException,
-        httpx.ReadTimeout,
-        httpx.ConnectTimeout,
-        httpx.WriteTimeout,
-        httpx.PoolTimeout,
-        httpx.ConnectError,
-        httpx.NetworkError,
-        httpx.RemoteProtocolError,
-    )):
+    if isinstance(
+        exc,
+        (
+            httpx.TimeoutException,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            httpx.ConnectError,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ),
+    ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = getattr(exc.response, "status_code", None)
@@ -753,16 +781,25 @@ def _should_rotate(exc: BaseException) -> bool:
     return any(
         kw in text
         for kw in (
-            "rate limit", "ratelimit", "rate_limit",
-            "quota", "too many requests", "429",
-            "resource_exhausted", "service_unavailable",
-            "model_not_found", "model not found",
+            "rate limit",
+            "ratelimit",
+            "rate_limit",
+            "quota",
+            "too many requests",
+            "429",
+            "resource_exhausted",
+            "service_unavailable",
+            "model_not_found",
+            "model not found",
             "does not exist or you do not have access",
             "no endpoints found",
             "unauthorized",
-            "request too large", "too large for model",
-            "context_length_exceeded", "context length",
-            "maximum context", "string too long",
+            "request too large",
+            "too large for model",
+            "context_length_exceeded",
+            "context length",
+            "maximum context",
+            "string too long",
             # Timeout phrasing seen in the wild across httpx/requests/stdlib
             "read operation timed out",
             "read timed out",
@@ -801,15 +838,19 @@ def _is_transient_retryable(exc: BaseException) -> bool:
       - 429 (rate limit)       -- handled by the cooldown mechanism
     """
     import httpx
-    if isinstance(exc, (
-        httpx.ReadTimeout,
-        httpx.ConnectTimeout,
-        httpx.WriteTimeout,
-        httpx.PoolTimeout,
-        httpx.ConnectError,
-        httpx.RemoteProtocolError,
-        httpx.NetworkError,
-    )):
+
+    if isinstance(
+        exc,
+        (
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+            httpx.NetworkError,
+        ),
+    ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = getattr(exc.response, "status_code", None)
@@ -877,6 +918,7 @@ def get_llm_with_fallback(role: RoleConfig):
 
         def _generate(self, messages, stop=None, run_manager=None, **kwargs):
             import logging
+
             log = logging.getLogger(__name__)
 
             last_exc: Optional[BaseException] = None
@@ -909,20 +951,20 @@ def get_llm_with_fallback(role: RoleConfig):
                             )
                         except Exception as exc:  # noqa: BLE001
                             final_exc = exc
-                            if (
-                                attempt < transient_retries
-                                and _is_transient_retryable(exc)
-                            ):
-                                wait_s = backoff_base * (2 ** attempt)
+                            if attempt < transient_retries and _is_transient_retryable(exc):
+                                wait_s = backoff_base * (2**attempt)
                                 msg = str(exc)
                                 if len(msg) > 100:
                                     msg = msg[:97] + "..."
                                 log.warning(
                                     "Transient error on %s:%s "
                                     "(attempt %d/%d), retrying in %.1fs: %s",
-                                    cfg.provider, cfg.model,
-                                    attempt + 1, transient_retries + 1,
-                                    wait_s, msg,
+                                    cfg.provider,
+                                    cfg.model,
+                                    attempt + 1,
+                                    transient_retries + 1,
+                                    wait_s,
+                                    msg,
                                 )
                                 _time.sleep(wait_s)
                                 continue
@@ -938,7 +980,11 @@ def get_llm_with_fallback(role: RoleConfig):
                             msg = msg[:117] + "..."
                         log.warning(
                             "Rotating past %s:%s [%s, cooldown=%.0fs] %s",
-                            cfg.provider, cfg.model, tag, wait, msg,
+                            cfg.provider,
+                            cfg.model,
+                            tag,
+                            wait,
+                            msg,
                         )
                         continue
                     if final_exc is not None:

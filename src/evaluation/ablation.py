@@ -42,14 +42,16 @@ def generate_variants(
         parts.append(f"k={k}")
         name = "_".join(parts)
 
-        variants.append(AblationConfig(
-            name=name,
-            sast_enabled=sast,
-            dependency_enabled=dep,
-            judge_enabled=judge,
-            retry_budget=k,
-            description=name.replace("_", ", "),
-        ))
+        variants.append(
+            AblationConfig(
+                name=name,
+                sast_enabled=sast,
+                dependency_enabled=dep,
+                judge_enabled=judge,
+                retry_budget=k,
+                description=name.replace("_", ", "),
+            )
+        )
 
     return variants
 
@@ -132,23 +134,60 @@ class AblationRunner:
     def _save_comparison(self):
         rows: List[Dict] = []
         for name, m in sorted(self._variant_metrics.items()):
-            rows.append({
-                "variant": name,
-                "total": m.total,
-                "passed": m.passed,
-                "pass_rate": round(m.pass_rate, 4),
-                "avg_coverage": round(m.avg_coverage, 1) if m.avg_coverage else None,
-                "avg_iterations": round(m.avg_iterations, 2),
-                "avg_time": round(m.avg_time, 2),
-            })
+            rows.append(
+                {
+                    "variant": name,
+                    "total": m.total,
+                    "passed": m.passed,
+                    "pass_rate": round(m.pass_rate, 4),
+                    "clean_pass_rate": (
+                        round(m.clean_pass_rate, 4) if m.clean_pass_rate is not None else None
+                    ),
+                    "provider_error_count": m.provider_error_count,
+                    "avg_coverage": (
+                        round(m.avg_coverage, 1) if m.avg_coverage is not None else None
+                    ),
+                    "avg_target_line_coverage": (
+                        round(m.avg_target_line_coverage, 1)
+                        if m.avg_target_line_coverage is not None
+                        else None
+                    ),
+                    "avg_target_branch_coverage": (
+                        round(m.avg_target_branch_coverage, 1)
+                        if m.avg_target_branch_coverage is not None
+                        else None
+                    ),
+                    "mutation_score": (
+                        round(m.mutation_score, 4) if m.mutation_score is not None else None
+                    ),
+                    "mutation_coverage": (
+                        round(m.mutation_coverage, 4) if m.mutation_coverage is not None else None
+                    ),
+                    "relevance_pass_rate": (
+                        round(m.relevance_pass_rate, 4)
+                        if m.relevance_pass_rate is not None
+                        else None
+                    ),
+                    "gaming_rate": round(m.gaming_rate, 4) if m.gaming_rate is not None else None,
+                    "assertion_presence_rate": (
+                        round(m.assertion_presence_rate, 4)
+                        if m.assertion_presence_rate is not None
+                        else None
+                    ),
+                    "avg_iterations": round(m.avg_iterations, 2),
+                    "avg_time": round(m.avg_time, 2),
+                }
+            )
 
         coding_prov = (
             self.base_config.coding_role.provenance()
-            if getattr(self.base_config, "coding_role", None) else None
+            if getattr(self.base_config, "coding_role", None)
+            else None
         )
         judge_prov = (
             (self.base_config.judge_role or self.base_config.coding_role).provenance()
-            if getattr(self.base_config, "coding_role", None) else None
+            if getattr(self.base_config, "coding_role", None)
+            else None
         )
         comparison_payload = {
             "dataset": self.dataset.name,
@@ -156,7 +195,7 @@ class AblationRunner:
                 "coding": coding_prov,
                 "judge": judge_prov,
                 "note": "Coding and judge models are pinned across all variants "
-                        "to isolate the effect of the ablated component.",
+                "to isolate the effect of the ablated component.",
             },
             "variants": rows,
         }
@@ -174,15 +213,29 @@ class AblationRunner:
                 f"**Judge:** `{judge_prov['primary']['provider']}:"
                 f"{judge_prov['primary']['model']}` (pinned across variants)\n"
             )
-        md_lines.extend([
-            "| Variant | Total | Passed | Pass rate | Avg cov | Avg iter | Avg time |",
-            "|---------|-------|--------|-----------|---------|----------|----------|",
-        ])
+        md_lines.extend(
+            [
+                "| Variant | Total | Passed | Case pass | Target line | Target branch | Mutation | Gaming | Avg iter | Avg time |",
+                "|---------|-------|--------|-----------|-------------|---------------|----------|--------|----------|----------|",
+            ]
+        )
         for r in rows:
-            cov = f"{r['avg_coverage']}%" if r["avg_coverage"] else "N/A"
+            target_line = (
+                f"{r['avg_target_line_coverage']}%"
+                if r["avg_target_line_coverage"] is not None
+                else "N/A"
+            )
+            target_branch = (
+                f"{r['avg_target_branch_coverage']}%"
+                if r["avg_target_branch_coverage"] is not None
+                else "N/A"
+            )
+            mutation = f"{r['mutation_score']:.1%}" if r["mutation_score"] is not None else "N/A"
+            gaming = f"{r['gaming_rate']:.1%}" if r["gaming_rate"] is not None else "N/A"
             md_lines.append(
                 f"| {r['variant']} | {r['total']} | {r['passed']} | {r['pass_rate']:.1%} "
-                f"| {cov} | {r['avg_iterations']} | {r['avg_time']}s |"
+                f"| {target_line} | {target_branch} | {mutation} | {gaming} "
+                f"| {r['avg_iterations']} | {r['avg_time']}s |"
             )
 
         md_path = self.results_dir / "comparison.md"

@@ -122,7 +122,7 @@ class RouterAgent:
     UI_TEST_KEYWORDS = (
         'ui test', 'e2e test', 'end-to-end', 'end to end',
         'playwright', 'selenium', 'browser automation',
-        'web test', 'acceptance test',
+        'web test', 'browser test', 'acceptance test',
     )
 
     # Explanation keywords; only used when the request is *not*
@@ -132,7 +132,7 @@ class RouterAgent:
     EXPLAIN_KEYWORDS = (
         'explain', 'what does', 'how does', 'walkthrough',
         'describe in plain english', 'summarise', 'summarize',
-        'big-o analysis', 'time complexity analysis',
+        'big-o analysis', 'time complexity analysis', 'complexity',
     )
 
     def classify_task(self, user_request: str) -> TaskType:

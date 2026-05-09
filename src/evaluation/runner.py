@@ -1,12 +1,19 @@
 """BenchmarkRunner: feeds datasets through the GDR pipeline and collects results."""
 
-import json
 import logging
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from .models import BenchmarkCase, EvalResult, EvalMetrics
+from .models import BenchmarkCase, EvalMetrics, EvalResult
+from .quality import (
+    compute_coverage_metrics,
+    compute_gate_quality_metrics,
+    compute_mutation_summary,
+    compute_oracle_metrics,
+    compute_relevance_metrics,
+    generate_python_mutants,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +43,7 @@ class BenchmarkRunner:
             self._results.append(result)
 
             result_path = self.results_dir / f"{case.id}.json"
-            result_path.write_text(
-                result.model_dump_json(indent=2), encoding="utf-8"
-            )
+            result_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
 
         return self._results
 
@@ -74,6 +79,8 @@ class BenchmarkRunner:
             else:
                 tests_passed = declared if state.get("status") == "success" else 0
 
+            quality_payload = self._build_quality_payload(case, state, gates, coverage_val)
+
             return EvalResult(
                 case_id=case.id,
                 passed=state.get("status") == "success",
@@ -90,6 +97,7 @@ class BenchmarkRunner:
                     "error_type": state.get("error_type"),
                     "error_message": state.get("error_message"),
                 },
+                **quality_payload,
             )
         except Exception as exc:
             elapsed = time.time() - start
@@ -100,6 +108,131 @@ class BenchmarkRunner:
                 elapsed_seconds=round(elapsed, 2),
                 error=str(exc),
             )
+
+    def _build_quality_payload(
+        self,
+        case: BenchmarkCase,
+        state: dict[str, Any],
+        gates: list[dict],
+        coverage_val: Optional[float],
+    ) -> dict[str, Any]:
+        """Build non-blocking quality metrics for a completed pipeline state."""
+        mode = getattr(getattr(self.config, "evaluation", None), "quality_mode", "fast")
+        if mode == "off":
+            return {}
+
+        test_code = state.get("generated_tests") or ""
+        passed = state.get("status") == "success"
+        coverage_metrics = compute_coverage_metrics(
+            state.get("sandbox_coverage_data"),
+            case.code,
+            case.metadata,
+            line_coverage=coverage_val,
+        )
+        if state.get("sandbox_branch_coverage") is not None:
+            coverage_metrics.setdefault("branch_coverage", state.get("sandbox_branch_coverage"))
+            coverage_metrics.setdefault(
+                "target_branch_coverage", state.get("sandbox_branch_coverage")
+            )
+
+        gate_metrics = compute_gate_quality_metrics(gates, case.metadata)
+        mutation_metrics: dict[str, Any] = {}
+        if mode == "full" and case.language.lower() == "python":
+            limit = getattr(self.config.evaluation, "mutation_max_mutants", 25)
+            mutants = generate_python_mutants(case.code, limit=limit)
+            if passed and test_code and mutants:
+                mutation_metrics = self._run_mutation_metrics(mutants, test_code)
+            else:
+                mutation_metrics = compute_mutation_summary(mutants)
+
+        reliability_metrics: dict[str, Any] = {}
+        repeats = getattr(self.config.evaluation, "reliability_repeats", 0)
+        if mode == "full" and repeats > 0 and case.language.lower() == "python" and test_code:
+            reliability_metrics = self._run_reliability_metrics(case.code, test_code, repeats)
+
+        bug_metrics: dict[str, Any] = {}
+        if case.metadata.get("buggy_code") or case.metadata.get("fixed_code"):
+            bug_metrics = {"eligible": True, "bug_detected": None}
+
+        return {
+            "quality": {
+                "mode": mode,
+                "provider_error": False,
+            },
+            "coverage_metrics": coverage_metrics,
+            "mutation_metrics": mutation_metrics,
+            "reliability_metrics": reliability_metrics,
+            "oracle_metrics": compute_oracle_metrics(test_code),
+            "relevance_metrics": compute_relevance_metrics(
+                test_code,
+                case.code,
+                case.metadata,
+                passed=passed,
+            ),
+            "safety_metrics": gate_metrics["safety_metrics"],
+            "dependency_metrics": gate_metrics["dependency_metrics"],
+            "bug_metrics": bug_metrics,
+        }
+
+    def _run_mutation_metrics(
+        self,
+        mutants: list[dict[str, Any]],
+        test_code: str,
+    ) -> dict[str, Any]:
+        """Run generated tests against mutants; True outcome means killed."""
+        from ..verification.sandbox import SandboxExecutor
+
+        outcomes: list[bool] = []
+        errors: list[str] = []
+        executor = SandboxExecutor(self.config.sandbox)
+        for mutant in mutants:
+            source = mutant.get("source_code")
+            if not isinstance(source, str):
+                errors.append(f"{mutant.get('id', '<unknown>')}: missing source")
+                continue
+            try:
+                result = executor.execute(source_code=source, test_code=test_code)
+            except Exception as exc:  # noqa: BLE001 - non-blocking metric collection
+                errors.append(f"{mutant.get('id', '<unknown>')}: {exc}")
+                continue
+            outcomes.append(not result.success)
+
+        summary = compute_mutation_summary(mutants, outcomes)
+        if errors:
+            summary["errors"] = errors
+        return summary
+
+    def _run_reliability_metrics(
+        self,
+        source_code: str,
+        test_code: str,
+        repeats: int,
+    ) -> dict[str, Any]:
+        """Repeat a passing suite to estimate flakiness; does not affect case-pass."""
+        from ..verification.sandbox import SandboxExecutor
+
+        executor = SandboxExecutor(self.config.sandbox)
+        outcomes: list[bool] = []
+        errors: list[str] = []
+        for i in range(max(0, repeats)):
+            try:
+                outcomes.append(
+                    executor.execute(source_code=source_code, test_code=test_code).success
+                )
+            except Exception as exc:  # noqa: BLE001 - non-blocking metric collection
+                outcomes.append(False)
+                errors.append(f"repeat {i + 1}: {exc}")
+
+        reliable = bool(outcomes) and all(outcomes)
+        metrics: dict[str, Any] = {
+            "repeats": len(outcomes),
+            "passed_repeats": sum(1 for item in outcomes if item),
+            "reliable": reliable,
+            "flaky": bool(outcomes) and not reliable,
+        }
+        if errors:
+            metrics["errors"] = errors
+        return metrics
 
     def summarize(self) -> EvalMetrics:
         return EvalMetrics.from_results(self._results, dataset_name=self.dataset.name)

@@ -25,25 +25,29 @@ def cli():
 
 @cli.command()
 @click.option(
-    "--file", "-f",
+    "--file",
+    "-f",
     type=click.Path(exists=True, path_type=Path),
     default=None,
     help="Path to source file (Python, JS/TS for unit tests, HTML for UI tests)",
 )
 @click.option(
-    "--output", "-o",
+    "--output",
+    "-o",
     type=click.Path(path_type=Path),
     default=None,
     help="Output path for generated tests (default: stdout)",
 )
 @click.option(
-    "--max-retries", "-r",
+    "--max-retries",
+    "-r",
     type=int,
     default=None,
     help="Maximum repair iterations (default: 3 for unit, 5 for UI)",
 )
 @click.option(
-    "--verbose", "-v",
+    "--verbose",
+    "-v",
     is_flag=True,
     help="Enable verbose output",
 )
@@ -60,19 +64,22 @@ def cli():
     help="Model name to use (default: from env)",
 )
 @click.option(
-    "--task-type", "-t",
+    "--task-type",
+    "-t",
     type=click.Choice(["unit_test", "ui_test", "explanation"]),
     default=None,
     help="Task type (default: auto-detect from request)",
 )
 @click.option(
-    "--url", "-u",
+    "--url",
+    "-u",
     type=str,
     default=None,
     help="Target URL for UI tests (live web application)",
 )
 @click.option(
-    "--description", "-d",
+    "--description",
+    "-d",
     type=str,
     default=None,
     help="Natural-language test description (used for UI tests)",
@@ -136,9 +143,13 @@ def generate(
         console.print("  2. Add your Groq API key (get one free at https://console.groq.com/)")
         sys.exit(1)
 
-    if config.coding_role and config.judge_role and (
-        config.coding_role.primary.provider != config.judge_role.primary.provider
-        or config.coding_role.primary.model != config.judge_role.primary.model
+    if (
+        config.coding_role
+        and config.judge_role
+        and (
+            config.coding_role.primary.provider != config.judge_role.primary.provider
+            or config.coding_role.primary.model != config.judge_role.primary.model
+        )
     ):
         cr = config.coding_role.primary
         jr = config.judge_role.primary
@@ -193,6 +204,7 @@ def generate(
         console.print(f"[red]Pipeline error: {e}[/red]")
         if verbose:
             import traceback
+
             traceback.print_exc()
         sys.exit(1)
 
@@ -217,6 +229,7 @@ def generate(
             console.print(f"\n[green]Output written to {output}[/green]")
         elif is_explanation:
             from rich.markdown import Markdown as RichMarkdown
+
             console.print("\n[bold]Code Explanation:[/bold]\n")
             console.print(RichMarkdown(final_output))
         else:
@@ -249,13 +262,13 @@ def _print_summary(result: dict):
     table = Table(title="Execution Summary")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
-    
+
     table.add_row("Status", result.get("status", "unknown"))
     table.add_row("Total Iterations", str(result.get("retry_count", 0) + 1))
     table.add_row("Language", result.get("routing_decision", {}).get("language", "unknown"))
     table.add_row("Task Type", result.get("task_type", "unknown"))
     table.add_row("Tests Generated", str(len(result.get("test_functions", []))))
-    
+
     report = result.get("verification_report") or {}
     if report:
         table.add_row("Verification Passed", str(report.get("overall_passed", False)))
@@ -278,60 +291,71 @@ def _print_summary(result: dict):
 def check():
     """Check environment and configuration."""
     console.print("[bold]Checking environment...[/bold]\n")
-    
+
     checks = []
-    
+
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
         checks.append(("dotenv", True, ""))
     except ImportError:
         checks.append(("dotenv", False, "python-dotenv not installed"))
-    
+
     import os
+
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
         checks.append(("GROQ_API_KEY", True, f"Set ({len(groq_key)} chars)"))
     else:
         checks.append(("GROQ_API_KEY", False, "Not set"))
-    
+
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
         checks.append(("OPENROUTER_API_KEY", True, f"Set ({len(openrouter_key)} chars)"))
     else:
         checks.append(("OPENROUTER_API_KEY", False, "Not set (optional)"))
-    
+
     try:
         import docker
+
         client = docker.from_env()
         client.ping()
         checks.append(("Docker", True, "Running"))
     except Exception as e:
         checks.append(("Docker", False, f"Not available: {e}"))
-    
+
     try:
         import langgraph
-        checks.append(("langgraph", True, f"v{langgraph.__version__ if hasattr(langgraph, '__version__') else 'installed'}"))
+
+        checks.append(
+            (
+                "langgraph",
+                True,
+                f"v{langgraph.__version__ if hasattr(langgraph, '__version__') else 'installed'}",
+            )
+        )
     except ImportError:
         checks.append(("langgraph", False, "Not installed"))
-    
+
     try:
         import langchain_groq
+
         checks.append(("langchain-groq", True, "Installed"))
     except ImportError:
         checks.append(("langchain-groq", False, "Not installed"))
-    
+
     table = Table(title="Environment Check")
     table.add_column("Component", style="cyan")
     table.add_column("Status", style="bold")
     table.add_column("Details")
-    
+
     for name, ok, details in checks:
         status = "[green]OK[/green]" if ok else "[red]MISSING[/red]"
         table.add_row(name, status, details)
-    
+
     console.print(table)
-    
+
     all_ok = all(ok for _, ok, _ in checks if "optional" not in _.lower())
     if not all_ok:
         console.print("\n[yellow]Some required components are missing.[/yellow]")
@@ -341,7 +365,8 @@ def check():
 
 @cli.command()
 @click.option(
-    "--limit", "-n",
+    "--limit",
+    "-n",
     type=int,
     default=5,
     help="Number of logs to show",
@@ -349,20 +374,20 @@ def check():
 def logs(limit: int):
     """View recent audit logs."""
     from .utils.logging import AuditLogger
-    
+
     logger = AuditLogger()
     log_files = logger.list_logs()[:limit]
-    
+
     if not log_files:
         console.print("[yellow]No audit logs found.[/yellow]")
         return
-    
+
     table = Table(title=f"Recent Audit Logs (showing {min(limit, len(log_files))})")
     table.add_column("File", style="cyan")
     table.add_column("Source", style="green")
     table.add_column("Iterations")
     table.add_column("Created")
-    
+
     for log_file in log_files:
         data = logger.load(log_file)
         table.add_row(
@@ -371,23 +396,44 @@ def logs(limit: int):
             str(data.get("total_iterations", 0)),
             data.get("created_at", "")[:19],
         )
-    
+
     console.print(table)
 
 
 BENCHMARK_CHOICES = [
-    "ult", "projecttest", "cweval", "codejudgebench",
-    "security", "dep_hallucination", "all",
+    "ult",
+    "projecttest",
+    "cweval",
+    "codejudgebench",
+    "security",
+    "dep_hallucination",
+    "all",
 ]
 
 
 @cli.command()
-@click.option("--benchmark", "-b", type=click.Choice(BENCHMARK_CHOICES), required=True, help="Benchmark to evaluate")
+@click.option(
+    "--benchmark",
+    "-b",
+    type=click.Choice(BENCHMARK_CHOICES),
+    required=True,
+    help="Benchmark to evaluate",
+)
 @click.option("--max-cases", "-n", type=int, default=None, help="Max cases to run")
 @click.option("--output-dir", "-o", type=str, default=None, help="Results directory")
-@click.option("--provider", default=None, help="Override coding provider (e.g. gemini, cerebras, groq). Leave unset to use CODING_PROVIDER from .env.")
+@click.option(
+    "--provider",
+    default=None,
+    help="Override coding provider (e.g. gemini, cerebras, groq). Leave unset to use CODING_PROVIDER from .env.",
+)
+@click.option(
+    "--quality",
+    type=click.Choice(["off", "fast", "full"]),
+    default=None,
+    help="Quality metric mode",
+)
 @click.option("--verbose", "-v", is_flag=True)
-def evaluate(benchmark, max_cases, output_dir, provider, verbose):
+def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
     """Run the pipeline against a benchmark dataset."""
     from .config import Config
     from .evaluation.benchmarks import get_dataset
@@ -395,6 +441,8 @@ def evaluate(benchmark, max_cases, output_dir, provider, verbose):
 
     config = Config.load(provider=provider)
     config.pipeline.verbose = verbose
+    if quality is not None:
+        config.evaluation.quality_mode = quality
     results_dir = output_dir or config.evaluation.results_dir
     max_cases = max_cases or config.evaluation.max_cases
 
@@ -411,15 +459,32 @@ def evaluate(benchmark, max_cases, output_dir, provider, verbose):
         runner.save_summary()
         metrics = runner.summarize()
         from rich.markdown import Markdown as RichMarkdown
+
         console.print(RichMarkdown(metrics.to_markdown()))
 
 
 @cli.command()
 @click.option("--benchmark", "-b", type=click.Choice(BENCHMARK_CHOICES), required=True)
 @click.option("--max-cases", "-n", type=int, default=None)
-@click.option("--axes", "-a", type=str, default="sast,dependency,judge,retries", help="Comma-separated ablation axes")
+@click.option(
+    "--axes",
+    "-a",
+    type=str,
+    default="sast,dependency,judge,retries",
+    help="Comma-separated ablation axes",
+)
 @click.option("--output-dir", "-o", type=str, default=None)
-@click.option("--provider", default=None, help="Override coding provider (e.g. gemini, cerebras, groq). Leave unset to use CODING_PROVIDER from .env.")
+@click.option(
+    "--provider",
+    default=None,
+    help="Override coding provider (e.g. gemini, cerebras, groq). Leave unset to use CODING_PROVIDER from .env.",
+)
+@click.option(
+    "--quality",
+    type=click.Choice(["off", "fast", "full"]),
+    default=None,
+    help="Quality metric mode",
+)
 @click.option(
     "--variants",
     type=str,
@@ -432,7 +497,7 @@ def evaluate(benchmark, max_cases, output_dir, provider, verbose):
     ),
 )
 @click.option("--verbose", "-v", is_flag=True)
-def ablation(benchmark, max_cases, axes, output_dir, provider, variants, verbose):
+def ablation(benchmark, max_cases, axes, output_dir, provider, quality, variants, verbose):
     """Run ablation studies across config variants."""
     from .config import Config
     from .evaluation.benchmarks import get_dataset
@@ -440,12 +505,12 @@ def ablation(benchmark, max_cases, axes, output_dir, provider, variants, verbose
 
     config = Config.load(provider=provider)
     config.pipeline.verbose = verbose
+    if quality is not None:
+        config.evaluation.quality_mode = quality
     results_dir = output_dir or config.evaluation.results_dir
 
     axes_list = [a.strip() for a in axes.split(",")]
-    only_variants = (
-        [v.strip() for v in variants.split(",") if v.strip()] if variants else None
-    )
+    only_variants = [v.strip() for v in variants.split(",") if v.strip()] if variants else None
 
     if benchmark == "all":
         names = [n for n in BENCHMARK_CHOICES if n != "all"]
@@ -483,6 +548,7 @@ def cost_analysis(log_dir, token_rate, cost_per_million):
     )
     md = analyzer.to_markdown()
     from rich.markdown import Markdown as RichMarkdown
+
     console.print(RichMarkdown(md))
 
 

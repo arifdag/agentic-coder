@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 from statistics import mean
 
-
 ROOT = Path("eval_results_phase6_v2")
 ABL_ROOT = Path("eval_results_ablation/ablation/ult")
 OUT = Path("phase6_ablation_evaluation_report.md")
@@ -70,6 +69,11 @@ def _benchmark_rows() -> list[dict]:
                 "tests_passed": summary.get("total_tests_passed", 0),
                 "tests_run": summary.get("total_tests_run", 0),
                 "coverage": summary.get("avg_coverage"),
+                "target_coverage": summary.get("avg_target_line_coverage"),
+                "target_branch": summary.get("avg_target_branch_coverage"),
+                "mutation_score": summary.get("mutation_score"),
+                "mutation_coverage": summary.get("mutation_coverage"),
+                "gaming_rate": summary.get("gaming_rate"),
                 "iterations": summary.get("avg_iterations", 0.0),
                 "time": summary.get("avg_time", 0.0),
                 "gate_pass_rates": summary.get("gate_pass_rates", {}),
@@ -89,6 +93,10 @@ def _ablation_rows() -> list[dict]:
                 "case_pass": summary.get("pass_rate", 0.0),
                 "test_pass": summary.get("test_pass_rate", 0.0),
                 "coverage": summary.get("avg_coverage"),
+                "target_coverage": summary.get("avg_target_line_coverage"),
+                "target_branch": summary.get("avg_target_branch_coverage"),
+                "mutation_score": summary.get("mutation_score"),
+                "gaming_rate": summary.get("gaming_rate"),
                 "iterations": summary.get("avg_iterations", 0.0),
                 "time": summary.get("avg_time", 0.0),
                 "rate_limited": _count_rate_limited(inner),
@@ -149,7 +157,7 @@ def generate() -> None:
         "pipeline failures.** All four `sast=off_dep=off_judge=off_*` "
         "variants are 100% 429 errors from Groq's daily quota, and "
         "several other variants are 10-70% contaminated. The original "
-        "claim \"without gates the pipeline collapses to 0%\" is therefore "
+        'claim "without gates the pipeline collapses to 0%" is therefore '
         "unsupported by the current run. A new `RL` (rate-limited) "
         "column in the table below makes the contamination explicit."
     )
@@ -171,34 +179,60 @@ def generate() -> None:
     lines.append("")
     lines.append("## Metric Definitions (What Scores Mean)")
     lines.append("")
-    lines.append("- `Pass rate (case-level)`: fraction of cases where **all** generated tests pass and all gates pass.")
+    lines.append(
+        "- `Pass rate (case-level)`: fraction of cases where **all** generated tests pass and all gates pass."
+    )
     lines.append("- `Tests passed`: pooled count of passing tests across all cases.")
-    lines.append("- `Test pass rate`: pooled `tests_passed / tests_run`; best quality signal for multi-test cases.")
-    lines.append("- `Avg coverage`: mean line coverage of `source_module.py` during sandbox execution.")
+    lines.append(
+        "- `Test pass rate`: pooled `tests_passed / tests_run`; best quality signal for multi-test cases."
+    )
+    lines.append(
+        "- `Avg coverage`: mean line coverage of `source_module.py` during sandbox execution."
+    )
+    lines.append(
+        "- `Target coverage`: coverage for the inferred target module/function when available."
+    )
+    lines.append(
+        "- `Mutation score`: killed mutants / executable mutants; optional and only present for quality runs."
+    )
+    lines.append("- `Gaming rate`: passing-looking tests with no structural target signal.")
     lines.append("- `Avg iterations`: mean number of GDR loop iterations consumed per case.")
     lines.append("- `Per-gate pass rates`: fraction of cases each gate accepted.")
     lines.append("")
     lines.append("## Benchmark Summary (`eval_results_phase6_v2`)")
     lines.append("")
-    lines.append("| Benchmark | Cases | Rate-limited | Case pass | Tests passed | Test pass | Avg coverage | Avg iterations | Avg time (s) |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append(
+        "| Benchmark | Cases | Rate-limited | Case pass | Tests passed | Test pass | Avg coverage | Target cov | Mutation | Gaming | Avg iterations | Avg time (s) |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in bench_rows:
         cov = f"{r['coverage']:.1f}%" if r["coverage"] is not None else "N/A"
+        target_cov = f"{r['target_coverage']:.1f}%" if r["target_coverage"] is not None else "N/A"
+        mutation = _pct(r["mutation_score"]) if r["mutation_score"] is not None else "N/A"
+        gaming = _pct(r["gaming_rate"]) if r["gaming_rate"] is not None else "N/A"
         lines.append(
             f"| {r['name']} | {r['total']} | {r['rate_limited']} | {_pct(r['pass_rate'])} | "
             f"{r['tests_passed']}/{r['tests_run']} | {_pct(r['test_pass_rate'])} | "
-            f"{cov} | {r['iterations']:.2f} | {r['time']:.2f} |"
+            f"{cov} | {target_cov} | {mutation} | {gaming} | {r['iterations']:.2f} | {r['time']:.2f} |"
         )
     lines.append("")
 
     lines.append("### Benchmark Interpretation")
     lines.append("")
-    lines.append("- The system runs end-to-end across all configured benchmarks (no benchmark crashed).")
-    lines.append("- `projecttest` case-pass is 0.0% because it is an all-tests-must-pass criterion across large suites;")
-    lines.append("  its `65.9%` test-pass and `62.6%` coverage indicate substantial partial correctness.")
+    lines.append(
+        "- The system runs end-to-end across all configured benchmarks (no benchmark crashed)."
+    )
+    lines.append(
+        "- `projecttest` case-pass is 0.0% because it is an all-tests-must-pass criterion across large suites;"
+    )
+    lines.append(
+        "  its `65.9%` test-pass and `62.6%` coverage indicate substantial partial correctness."
+    )
     lines.append("- `security` and `cweval` should be interpreted with gate behavior context:")
     lines.append("  lower SAST pass can indicate better vulnerability detection strictness.")
-    lines.append("- `ult` is the strongest clean benchmark score in this run: 30.0% case-pass with 50.4% pooled test-pass.")
+    lines.append(
+        "- `ult` is the strongest clean benchmark score in this run: 30.0% case-pass with 50.4% pooled test-pass."
+    )
     lines.append("")
 
     lines.append("## ULT Ablation Summary (32 Variants)")
@@ -213,13 +247,17 @@ def generate() -> None:
             "drawing conclusions from them."
         )
         lines.append("")
-    lines.append("| Variant | Case pass | Test pass | Avg coverage | Avg iterations | Avg time (s) | RL |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    lines.append(
+        "| Variant | Case pass | Test pass | Target cov | Mutation | Gaming | Avg iterations | Avg time (s) | RL |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in ab_rows:
-        cov = f"{r['coverage']:.1f}%" if r["coverage"] is not None else "N/A"
+        target_cov = f"{r['target_coverage']:.1f}%" if r["target_coverage"] is not None else "N/A"
+        mutation = _pct(r["mutation_score"]) if r["mutation_score"] is not None else "N/A"
+        gaming = _pct(r["gaming_rate"]) if r["gaming_rate"] is not None else "N/A"
         lines.append(
             f"| `{r['variant']}` | {_pct(r['case_pass'])} | {_pct(r['test_pass'])} | "
-            f"{cov} | {r['iterations']:.2f} | {r['time']:.2f} | {r['rate_limited']} |"
+            f"{target_cov} | {mutation} | {gaming} | {r['iterations']:.2f} | {r['time']:.2f} | {r['rate_limited']} |"
         )
     lines.append("")
 
@@ -238,7 +276,9 @@ def generate() -> None:
         )
 
     no_gate = [r for r in ab_rows if r["variant"].startswith("sast=off_dep=off_judge=off_")]
-    if no_gate and all(r["rate_limited"] == r.get("rate_limited", 0) and r["rate_limited"] >= 10 for r in no_gate):
+    if no_gate and all(
+        r["rate_limited"] == r.get("rate_limited", 0) and r["rate_limited"] >= 10 for r in no_gate
+    ):
         lines.append(
             "- **The all-gates-off variants are 100% rate-limited and cannot be "
             "used to support any claim** about pipeline behaviour without "
@@ -272,14 +312,22 @@ def generate() -> None:
     lines.append("## Practical Conclusions")
     lines.append("")
     lines.append("- The model stack is functional and produces meaningful tests across benchmarks.")
-    lines.append("- Report both case-pass and test-pass in paper figures; test-pass avoids all-or-nothing distortion.")
-    lines.append("- For ULT, k=3 appears to be a reasonable budget/quality tradeoff; k=5 increases compute substantially.")
+    lines.append(
+        "- Report both case-pass and test-pass in paper figures; test-pass avoids all-or-nothing distortion."
+    )
+    lines.append(
+        "- For ULT, k=3 appears to be a reasonable budget/quality tradeoff; k=5 increases compute substantially."
+    )
     lines.append("- Keep provenance (provider:model) alongside every run for reproducibility.")
     lines.append("")
     lines.append("## Suggested Paper Table Fields")
     lines.append("")
-    lines.append("- Benchmark, N cases, case-pass, pooled test-pass, avg coverage, avg iterations, avg runtime.")
-    lines.append("- Ablation axis values (sast/dep/judge/k), case-pass, pooled test-pass, coverage.")
+    lines.append(
+        "- Benchmark, N cases, case-pass, pooled test-pass, avg coverage, avg iterations, avg runtime."
+    )
+    lines.append(
+        "- Ablation axis values (sast/dep/judge/k), case-pass, pooled test-pass, coverage."
+    )
 
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Wrote {OUT}")

@@ -78,6 +78,8 @@ class PipelineState(TypedDict):
     # drop keys not declared in the TypedDict, so they must live here.
     sandbox_tests_run: Optional[int]
     sandbox_tests_passed: Optional[int]
+    sandbox_branch_coverage: Optional[float]
+    sandbox_coverage_data: Optional[dict]
 
     # Legacy single-gate fields kept for CLI compatibility
     verification_result: Optional[dict]
@@ -115,32 +117,46 @@ def create_pipeline(config: Optional[Config] = None):
     ui_sandbox = UITestExecutor(config.ui_test)
     audit_logger = AuditLogger(config.pipeline.audit_log_dir)
 
-    sast_analyzer = SastAnalyzer(
-        semgrep_rules=config.sast.semgrep_rules,
-        bandit_enabled=config.sast.bandit_enabled,
-        timeout=config.sast.timeout,
-    ) if config.sast.enabled else None
+    sast_analyzer = (
+        SastAnalyzer(
+            semgrep_rules=config.sast.semgrep_rules,
+            bandit_enabled=config.sast.bandit_enabled,
+            timeout=config.sast.timeout,
+        )
+        if config.sast.enabled
+        else None
+    )
 
-    dep_validator = DependencyValidator(
-        pypi_timeout=config.dependency.pypi_timeout,
-    ) if config.dependency.enabled else None
+    dep_validator = (
+        DependencyValidator(
+            pypi_timeout=config.dependency.pypi_timeout,
+        )
+        if config.dependency.enabled
+        else None
+    )
 
     judge_llm = get_role_llm(config, "judge")
 
     sast_judge = SastJudge(judge_llm) if config.judge.enabled else None
 
     explanation_judge = ExplanationJudge(judge_llm) if config.explanation.judge_enabled else None
-    complexity_validator = ComplexityValidator() if config.explanation.complexity_check_enabled else None
+    complexity_validator = (
+        ComplexityValidator() if config.explanation.complexity_check_enabled else None
+    )
 
     # Anti-gaming relevance gate (opt-in via RELEVANCE_GATE_ENABLED).
     # Catches the failure mode where the LLM ignores the target function
     # and writes tests for fictional code -- discovered in the ULT
     # ablation, where ~33% of "passing" cases at k=5 had zero tests
     # referencing the target.
-    relevance_validator = RelevanceValidator(
-        source_module=config.relevance.source_module,
-        min_relevance_signals=config.relevance.min_signals,
-    ) if config.relevance.enabled else None
+    relevance_validator = (
+        RelevanceValidator(
+            source_module=config.relevance.source_module,
+            min_relevance_signals=config.relevance.min_signals,
+        )
+        if config.relevance.enabled
+        else None
+    )
 
     # ── Nodes ──────────────────────────────────────────────────────────
 
@@ -259,8 +275,9 @@ def create_pipeline(config: Optional[Config] = None):
 
         def run_sast():
             if is_ui:
-                return GateResult(gate_name="sast", passed=True, findings=[],
-                                  details="Skipped for UI tests")
+                return GateResult(
+                    gate_name="sast", passed=True, findings=[], details="Skipped for UI tests"
+                )
             if sast_analyzer:
                 return sast_analyzer.analyze(source_and_test, language=lang)
             return GateResult(gate_name="sast", passed=True, findings=[])
@@ -363,8 +380,12 @@ def create_pipeline(config: Optional[Config] = None):
 
         if task_type == TaskType.EXPLANATION.value:
             if not complexity_validator:
-                noop_gate = GateResult(gate_name="complexity", passed=True, findings=[],
-                                       details="Complexity validation disabled")
+                noop_gate = GateResult(
+                    gate_name="complexity",
+                    passed=True,
+                    findings=[],
+                    details="Complexity validation disabled",
+                )
                 prior_gates = state.get("gate_results") or []
                 return {
                     **state,
@@ -426,6 +447,8 @@ def create_pipeline(config: Optional[Config] = None):
             # all-or-nothing pass flag.
             "sandbox_tests_run": getattr(result, "tests_run", 0),
             "sandbox_tests_passed": getattr(result, "tests_passed", 0),
+            "sandbox_branch_coverage": getattr(result, "branch_coverage", None),
+            "sandbox_coverage_data": getattr(result, "coverage_data", None),
             "status": "sandbox_checked",
         }
 
@@ -438,7 +461,8 @@ def create_pipeline(config: Optional[Config] = None):
         coverage = None
         if sandbox_gate and sandbox_gate.details:
             import re
-            m = re.search(r'TOTAL\s+\d+\s+\d+\s+(\d+)%', sandbox_gate.details)
+
+            m = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", sandbox_gate.details)
             if m:
                 coverage = float(m.group(1))
 
@@ -595,16 +619,24 @@ def create_pipeline(config: Optional[Config] = None):
             expl_dict = state.get("generated_explanation")
             if expl_dict:
                 from ..agents.explanation import CodeExplanation
+
                 final_output = CodeExplanation(**expl_dict).to_markdown()
             else:
                 final_output = state.get("generated_tests")
         else:
-            final_output = state.get("generated_tests") if state["verification_passed"] else state.get("generated_tests")
+            final_output = (
+                state.get("generated_tests")
+                if state["verification_passed"]
+                else state.get("generated_tests")
+            )
 
         provenance = {
             "coding": config.coding_role.provenance() if config.coding_role else None,
-            "judge": (config.judge_role or config.coding_role).provenance()
-                     if (config.judge_role or config.coding_role) else None,
+            "judge": (
+                (config.judge_role or config.coding_role).provenance()
+                if (config.judge_role or config.coding_role)
+                else None
+            ),
             "timestamp": datetime.now().isoformat(),
         }
         audit_logger.save(
@@ -658,15 +690,17 @@ def create_pipeline(config: Optional[Config] = None):
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-def _truncate_sandbox_output(stdout: Optional[str], stderr: Optional[str],
-                             head: int = 1500, tail: int = 6500) -> Optional[str]:
+
+def _truncate_sandbox_output(
+    stdout: Optional[str], stderr: Optional[str], head: int = 1500, tail: int = 6500
+) -> Optional[str]:
     """Return a truncated view of pytest output that preserves the end.
 
     Pytest prints failures and the summary at the end of stdout, so a naive
     head-only truncation hides the information repair needs. We keep a small
     header plus the tail of stdout and append stderr if present.
     """
-    combined = (stdout or "")
+    combined = stdout or ""
     if stderr:
         combined += "\n--- stderr ---\n" + stderr
 
@@ -705,28 +739,34 @@ def _sandbox_to_findings(result) -> List[Finding]:
     }
 
     if result.error_type:
-        findings.append(Finding(
-            severity=Severity.ERROR,
-            code=result.error_type,
-            message=result.error_message or "Sandbox execution failed",
-            line=result.line_number,
-            suggestion=_SUGGESTIONS.get(result.error_type),
-        ))
+        findings.append(
+            Finding(
+                severity=Severity.ERROR,
+                code=result.error_type,
+                message=result.error_message or "Sandbox execution failed",
+                line=result.line_number,
+                suggestion=_SUGGESTIONS.get(result.error_type),
+            )
+        )
 
     if result.tests_failed > 0 and not result.error_type:
-        findings.append(Finding(
-            severity=Severity.ERROR,
-            code="test_failure",
-            message=f"{result.tests_failed} test(s) failed",
-        ))
+        findings.append(
+            Finding(
+                severity=Severity.ERROR,
+                code="test_failure",
+                message=f"{result.tests_failed} test(s) failed",
+            )
+        )
 
     if result.tests_run == 0 and not result.error_type:
-        findings.append(Finding(
-            severity=Severity.ERROR,
-            code="no_tests_collected",
-            message="No test functions were collected by pytest",
-            suggestion="Ensure the test file defines at least one test_* function or Test* class",
-        ))
+        findings.append(
+            Finding(
+                severity=Severity.ERROR,
+                code="no_tests_collected",
+                message="No test functions were collected by pytest",
+                suggestion="Ensure the test file defines at least one test_* function or Test* class",
+            )
+        )
 
     return findings
 
@@ -766,6 +806,10 @@ def run_pipeline(
         "coverage_report": None,
         "verification_result": None,
         "verification_passed": False,
+        "sandbox_tests_run": None,
+        "sandbox_tests_passed": None,
+        "sandbox_branch_coverage": None,
+        "sandbox_coverage_data": None,
         "retry_count": 0,
         "max_retries": max_retries,
         "error_type": None,
