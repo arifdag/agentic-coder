@@ -1,36 +1,41 @@
 """Tests for the LLM Agent Platform pipeline components."""
 
 import pytest
-from pathlib import Path
 
-from src.agents.router import RouterAgent, Language, TaskType
-from src.agents.unit_test import UnitTestAgent, RepairContext
+from src.agents.router import Language, RouterAgent, TaskType
+from src.agents.unit_test import (
+    GENERATION_TEMPLATE,
+    REPAIR_TEMPLATE,
+    SYSTEM_PROMPT,
+    RepairContext,
+    UnitTestAgent,
+)
 
 
 class TestRouterAgent:
     """Tests for the RouterAgent."""
-    
+
     def setup_method(self):
         self.router = RouterAgent()
-    
+
     def test_detect_python_by_extension(self):
         result = self.router.detect_language("some code", "test.py")
         assert result == Language.PYTHON
-    
+
     def test_detect_python_by_syntax(self):
-        code = '''
+        code = """
 def hello():
     print("Hello, world!")
 
 class MyClass:
     def __init__(self):
         self.value = None
-'''
+"""
         result = self.router.detect_language(code)
         assert result == Language.PYTHON
-    
+
     def test_detect_javascript_by_syntax(self):
-        code = '''
+        code = """
 const hello = () => {
     console.log("Hello");
 };
@@ -38,12 +43,12 @@ const hello = () => {
 function greet(name) {
     return `Hello, ${name}`;
 }
-'''
+"""
         result = self.router.detect_language(code)
         assert result == Language.JAVASCRIPT
-    
+
     def test_detect_typescript_by_syntax(self):
-        code = '''
+        code = """
 interface User {
     name: string;
     age: number;
@@ -52,18 +57,18 @@ interface User {
 const greet = (user: User): string => {
     return `Hello, ${user.name}`;
 };
-'''
+"""
         result = self.router.detect_language(code)
         assert result == Language.TYPESCRIPT
-    
+
     def test_classify_unit_test_task(self):
         result = self.router.classify_task("Generate unit tests for this function")
         assert result == TaskType.UNIT_TEST
-    
+
     def test_classify_ui_test_task(self):
         result = self.router.classify_task("Create e2e tests with playwright")
         assert result == TaskType.UI_TEST
-    
+
     def test_classify_explanation_task(self):
         result = self.router.classify_task("Explain what this code does")
         assert result == TaskType.EXPLANATION
@@ -93,18 +98,18 @@ const greet = (user: User): string => {
             "that describes user flow."
         )
         assert result == TaskType.UI_TEST
-    
+
     def test_route_python_unit_test(self):
-        code = '''
+        code = """
 def add(a, b):
     return a + b
-'''
+"""
         result = self.router.route(code, "Generate tests", "utils.py")
         assert result.language == Language.PYTHON
         assert result.task_type == TaskType.UNIT_TEST
         assert result.framework_hint == "pytest"
         assert result.confidence == 1.0
-    
+
     def test_route_unknown_language(self):
         result = self.router.route("random text", "test this")
         assert result.language == Language.UNKNOWN
@@ -113,9 +118,9 @@ def add(a, b):
 
 class TestUnitTestAgentParsing:
     """Tests for UnitTestAgent parsing methods."""
-    
+
     def test_extract_test_functions(self):
-        code = '''
+        code = """
 def test_add_positive():
     assert add(1, 2) == 3
 
@@ -127,18 +132,18 @@ def helper_function():
 
 def test_add_zero():
     assert add(0, 0) == 0
-'''
+"""
         agent = UnitTestAgent.__new__(UnitTestAgent)
         result = agent._extract_test_functions(code)
-        
+
         assert len(result) == 3
         assert "test_add_positive" in result
         assert "test_add_negative" in result
         assert "test_add_zero" in result
         assert "helper_function" not in result
-    
+
     def test_extract_imports(self):
-        code = '''
+        code = """
 import pytest
 from source_module import add, subtract
 import os
@@ -146,16 +151,16 @@ from pathlib import Path
 
 def test_something():
     pass
-'''
+"""
         agent = UnitTestAgent.__new__(UnitTestAgent)
         result = agent._extract_imports(code)
-        
+
         assert len(result) == 4
         assert "import pytest" in result
         assert "from source_module import add, subtract" in result
-    
+
     def test_extract_code_from_markdown(self):
-        response = '''
+        response = """
 Here are the tests:
 
 ```python
@@ -166,10 +171,10 @@ def test_example():
 ```
 
 These tests cover the basic functionality.
-'''
+"""
         agent = UnitTestAgent.__new__(UnitTestAgent)
         result = agent._extract_code_from_response(response)
-        
+
         assert "import pytest" in result
         assert "def test_example" in result
         assert "Here are the tests" not in result
@@ -177,7 +182,7 @@ These tests cover the basic functionality.
 
 class TestRepairContext:
     """Tests for RepairContext model."""
-    
+
     def test_repair_context_creation(self):
         context = RepairContext(
             previous_code="def test(): pass",
@@ -203,22 +208,105 @@ class TestRepairContext:
 
 class TestIntegration:
     """Integration tests (require API key to run)."""
-    
+
     @pytest.mark.skip(reason="Requires API key")
     def test_full_pipeline(self):
         from src.graph.pipeline import run_pipeline
-        
+
         code = '''
 def add(a: int, b: int) -> int:
     """Add two numbers."""
     return a + b
 '''
-        
+
         result = run_pipeline(
             code=code,
             user_request="Generate unit tests",
             max_retries=1,
         )
-        
+
         assert result["status"] in ["success", "failed_after_retries"]
         assert result["generated_tests"] is not None
+
+
+class TestGenerationPromptContent:
+    """Verify that SYSTEM_PROMPT and GENERATION_TEMPLATE include all critical guidance."""
+
+    def test_system_prompt_import_and_source_module_guidance(self):
+        """SYSTEM_PROMPT must guide importing from the source module."""
+        text = SYSTEM_PROMPT.lower()
+        assert "source_module" in text
+        assert "source module" in text
+        assert "import" in text
+
+    def test_system_prompt_call_or_instantiate_target(self):
+        """SYSTEM_PROMPT must require calling or instantiating the original targets."""
+        text = SYSTEM_PROMPT.lower()
+        assert "call" in text or "instantiate" in text
+
+    def test_system_prompt_forbid_shadow_reimplement(self):
+        """SYSTEM_PROMPT must forbid redefining, shadowing, or re-implementing source functions."""
+        text = SYSTEM_PROMPT.lower()
+        assert "redefine" in text or "shadow" in text or "re-implement" in text
+
+    def test_system_prompt_meaningful_assertions(self):
+        """SYSTEM_PROMPT must require meaningful assertions and pytest.raises."""
+        text = SYSTEM_PROMPT.lower()
+        assert "meaningful" in text
+        assert "assert" in text
+        assert "pytest.raises" in SYSTEM_PROMPT
+
+    def test_system_prompt_forbid_dummy_assertions(self):
+        """SYSTEM_PROMPT must explicitly forbid dummy assertions like assert True."""
+        text = SYSTEM_PROMPT.lower()
+        assert "assert true" in text or "assert 1 == 1" in text
+
+    def test_system_prompt_branch_coverage(self):
+        """SYSTEM_PROMPT must require executing target logic, not just importing."""
+        text = SYSTEM_PROMPT.lower()
+        assert "branch" in text or "execute" in text or "logic" in text
+
+    def test_generation_template_import_and_call_targets(self):
+        """GENERATION_TEMPLATE must require importing and calling real targets."""
+        text = GENERATION_TEMPLATE.lower()
+        assert "import" in text
+        assert "call" in text or "instantiate" in text
+        assert "source_module" in text
+        assert "source module" in text
+
+    def test_generation_template_forbid_dummy_assertions(self):
+        """GENERATION_TEMPLATE must forbid dummy assertions."""
+        text = GENERATION_TEMPLATE.lower()
+        assert "assert true" in text or "assert 1 == 1" in text or "dummy" in text
+
+
+class TestRepairPromptContent:
+    """Verify that REPAIR_TEMPLATE includes relevance-specific repair guidance."""
+
+    def test_repair_relevance_not_relevant(self):
+        """REPAIR_TEMPLATE must include guidance for relevance / target_not_relevant."""
+        text = REPAIR_TEMPLATE.lower()
+        assert "target_not_relevant" in text or "relevance" in text
+        assert "tests_unrelated_to_source" in text
+
+    def test_repair_target_not_executed(self):
+        """REPAIR_TEMPLATE must include guidance for target_not_executed."""
+        text = REPAIR_TEMPLATE.lower()
+        assert "target_not_executed" in text or "target_relevance" in text
+
+    def test_repair_no_assertions_and_dummy(self):
+        """REPAIR_TEMPLATE must cover no_assertions and dummy_assertions_only."""
+        text = REPAIR_TEMPLATE.lower()
+        assert "no_assertions" in text
+        assert "dummy_assertions" in text or "dummy assertion" in text
+
+    def test_repair_target_shadowed(self):
+        """REPAIR_TEMPLATE must cover target_shadowed_in_tests."""
+        assert "target_shadowed" in REPAIR_TEMPLATE
+
+    def test_repair_body_execution_required(self):
+        """REPAIR_TEMPLATE must state that target body execution is required, not import-only."""
+        text = REPAIR_TEMPLATE.lower()
+        assert "source_module" in text
+        assert "body" in text or "executed" in text
+        assert "not merely import" in text or "call" in text or "instantiate" in text
