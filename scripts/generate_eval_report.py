@@ -71,8 +71,10 @@ def _benchmark_rows() -> list[dict]:
                 "coverage": summary.get("avg_coverage"),
                 "target_coverage": summary.get("avg_target_line_coverage"),
                 "target_branch": summary.get("avg_target_branch_coverage"),
+                "coverage_gain": summary.get("avg_coverage_gain"),
                 "mutation_score": summary.get("mutation_score"),
                 "mutation_coverage": summary.get("mutation_coverage"),
+                "bug_detection_rate": summary.get("bug_detection_rate"),
                 "gaming_rate": summary.get("gaming_rate"),
                 "iterations": summary.get("avg_iterations", 0.0),
                 "time": summary.get("avg_time", 0.0),
@@ -95,7 +97,9 @@ def _ablation_rows() -> list[dict]:
                 "coverage": summary.get("avg_coverage"),
                 "target_coverage": summary.get("avg_target_line_coverage"),
                 "target_branch": summary.get("avg_target_branch_coverage"),
+                "coverage_gain": summary.get("avg_coverage_gain"),
                 "mutation_score": summary.get("mutation_score"),
+                "bug_detection_rate": summary.get("bug_detection_rate"),
                 "gaming_rate": summary.get("gaming_rate"),
                 "iterations": summary.get("avg_iterations", 0.0),
                 "time": summary.get("avg_time", 0.0),
@@ -202,18 +206,21 @@ def generate() -> None:
     lines.append("## Benchmark Summary (`eval_results_phase6_v2`)")
     lines.append("")
     lines.append(
-        "| Benchmark | Cases | Rate-limited | Case pass | Tests passed | Test pass | Avg coverage | Target cov | Mutation | Gaming | Avg iterations | Avg time (s) |"
+        "| Benchmark | Cases | Rate-limited | Case pass | Tests passed | Test pass | Avg coverage | Target cov | Cov gain | Mutation | Bug detect | Gaming | Avg iterations | Avg time (s) |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in bench_rows:
         cov = f"{r['coverage']:.1f}%" if r["coverage"] is not None else "N/A"
         target_cov = f"{r['target_coverage']:.1f}%" if r["target_coverage"] is not None else "N/A"
+        cov_gain = f"{r['coverage_gain']:+.1f}" if r["coverage_gain"] is not None else "N/A"
         mutation = _pct(r["mutation_score"]) if r["mutation_score"] is not None else "N/A"
+        bug_detect = _pct(r["bug_detection_rate"]) if r["bug_detection_rate"] is not None else "N/A"
         gaming = _pct(r["gaming_rate"]) if r["gaming_rate"] is not None else "N/A"
         lines.append(
             f"| {r['name']} | {r['total']} | {r['rate_limited']} | {_pct(r['pass_rate'])} | "
             f"{r['tests_passed']}/{r['tests_run']} | {_pct(r['test_pass_rate'])} | "
-            f"{cov} | {target_cov} | {mutation} | {gaming} | {r['iterations']:.2f} | {r['time']:.2f} |"
+            f"{cov} | {target_cov} | {cov_gain} | {mutation} | {bug_detect} | "
+            f"{gaming} | {r['iterations']:.2f} | {r['time']:.2f} |"
         )
     lines.append("")
 
@@ -248,16 +255,19 @@ def generate() -> None:
         )
         lines.append("")
     lines.append(
-        "| Variant | Case pass | Test pass | Target cov | Mutation | Gaming | Avg iterations | Avg time (s) | RL |"
+        "| Variant | Case pass | Test pass | Target cov | Cov gain | Mutation | Bug detect | Gaming | Avg iterations | Avg time (s) | RL |"
     )
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in ab_rows:
         target_cov = f"{r['target_coverage']:.1f}%" if r["target_coverage"] is not None else "N/A"
+        cov_gain = f"{r['coverage_gain']:+.1f}" if r["coverage_gain"] is not None else "N/A"
         mutation = _pct(r["mutation_score"]) if r["mutation_score"] is not None else "N/A"
+        bug_detect = _pct(r["bug_detection_rate"]) if r["bug_detection_rate"] is not None else "N/A"
         gaming = _pct(r["gaming_rate"]) if r["gaming_rate"] is not None else "N/A"
         lines.append(
             f"| `{r['variant']}` | {_pct(r['case_pass'])} | {_pct(r['test_pass'])} | "
-            f"{target_cov} | {mutation} | {gaming} | {r['iterations']:.2f} | {r['time']:.2f} | {r['rate_limited']} |"
+            f"{target_cov} | {cov_gain} | {mutation} | {bug_detect} | {gaming} | "
+            f"{r['iterations']:.2f} | {r['time']:.2f} | {r['rate_limited']} |"
         )
     lines.append("")
 

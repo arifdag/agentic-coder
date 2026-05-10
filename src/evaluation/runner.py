@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .models import BenchmarkCase, EvalMetrics, EvalResult
+from .models import BenchmarkCase, EvalMetrics, EvalResult, _number
 from .quality import (
     compute_coverage_metrics,
     compute_gate_quality_metrics,
@@ -17,6 +17,37 @@ from .quality import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _extract_numeric_coverage(value: Any, key_hint: str = "") -> Optional[float]:
+    key_lower = key_hint.lower()
+    if "coverage" in key_lower or "cov" in key_lower or "percent" in key_lower:
+        num = _number(value)
+        if num is not None:
+            return num
+    if isinstance(value, dict):
+        for key, child in value.items():
+            found = _extract_numeric_coverage(child, str(key))
+            if found is not None:
+                return found
+        for child in value.values():
+            found = _extract_numeric_coverage(child)
+            if found is not None:
+                return found
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            found = _extract_numeric_coverage(child, key_hint)
+            if found is not None:
+                return found
+    return _number(value)
+
+
+def _extract_baseline_coverage(metadata: dict[str, Any]) -> Optional[float]:
+    """Conservatively extract a numeric baseline coverage value from metadata."""
+    raw = metadata.get("baseline_covs")
+    if raw is None:
+        return None
+    return _extract_numeric_coverage(raw, "baseline_covs")
 
 
 class BenchmarkRunner:
@@ -65,13 +96,6 @@ class BenchmarkRunner:
             gates = report.get("gates", [])
             coverage_val = report.get("coverage")
 
-            # Prefer the *actual* pytest counts the sandbox parsed; fall
-            # back to the LLM's declared test_functions only when the
-            # sandbox didn't run (e.g. pre-sandbox failure). This makes
-            # the per-case `tests_passed` field a real signal usable for
-            # paper-grade metrics like "mean per-case test pass rate"
-            # instead of an all-or-nothing flag that collapses an
-            # 82-percent-passing case to "0 passed".
             sb_run = state.get("sandbox_tests_run")
             sb_pass = state.get("sandbox_tests_passed")
             declared = len(state.get("test_functions") or [])
@@ -137,6 +161,11 @@ class BenchmarkRunner:
                 "target_branch_coverage", state.get("sandbox_branch_coverage")
             )
 
+        baseline_cov = _extract_baseline_coverage(case.metadata)
+        if baseline_cov is not None and coverage_metrics.get("line_coverage") is not None:
+            gain = coverage_metrics["line_coverage"] - baseline_cov
+            coverage_metrics["coverage_gain"] = round(gain, 2)
+
         gate_metrics = compute_gate_quality_metrics(gates, case.metadata)
         sandbox_passed = next(
             (bool(g.get("passed")) for g in gates if g.get("gate_name") == "sandbox"),
@@ -157,7 +186,10 @@ class BenchmarkRunner:
             reliability_metrics = self._run_reliability_metrics(case.code, test_code, repeats)
 
         bug_metrics: dict[str, Any] = {}
-        if case.metadata.get("buggy_code") or case.metadata.get("fixed_code"):
+        buggy_code = case.metadata.get("buggy_code")
+        if buggy_code:
+            bug_metrics = self._run_bug_detection(case, test_code, buggy_code, sandbox_passed)
+        elif case.metadata.get("fixed_code"):
             bug_metrics = {"eligible": True, "bug_detected": None}
 
         return {
@@ -180,6 +212,38 @@ class BenchmarkRunner:
             "dependency_metrics": gate_metrics["dependency_metrics"],
             "bug_metrics": bug_metrics,
         }
+
+    def _run_bug_detection(
+        self,
+        case: BenchmarkCase,
+        test_code: str,
+        buggy_code: str,
+        fixed_passed: bool,
+    ) -> dict[str, Any]:
+        """Run generated tests against buggy code. Non-blocking; does not change case-pass."""
+        from ..verification.sandbox import SandboxExecutor
+
+        metrics: dict[str, Any] = {
+            "eligible": True,
+            "fixed_passed": fixed_passed,
+            "buggy_failed": None,
+            "bug_detected": None,
+            "errors": [],
+        }
+        if not fixed_passed or not test_code:
+            return metrics
+
+        executor = SandboxExecutor(self.config.sandbox)
+        try:
+            result = executor.execute(source_code=buggy_code, test_code=test_code)
+        except Exception as exc:  # noqa: BLE001 - non-blocking metric collection
+            metrics["errors"].append(str(exc))
+            return metrics
+
+        buggy_failed = not result.success
+        metrics["buggy_failed"] = buggy_failed
+        metrics["bug_detected"] = buggy_failed
+        return metrics
 
     def _run_mutation_metrics(
         self,

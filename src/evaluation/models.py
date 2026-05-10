@@ -120,6 +120,7 @@ class EvalMetrics(BaseModel):
     flakiness_rate: Optional[float] = None
     assertion_presence_rate: Optional[float] = None
     avg_assertions_per_test: Optional[float] = None
+    avg_coverage_gain: Optional[float] = None
 
     @classmethod
     def from_results(cls, results: List[EvalResult], dataset_name: str = "") -> "EvalMetrics":
@@ -279,6 +280,13 @@ class EvalMetrics(BaseModel):
         )
         avg_assertions_per_test = _rate(total_assertions, total_oracle_tests)
 
+        coverage_gains = [
+            v
+            for r in results
+            if (v := _number(r.coverage_metrics.get("coverage_gain"))) is not None
+        ]
+        avg_coverage_gain = _mean(coverage_gains)
+
         return cls(
             dataset_name=dataset_name,
             total=total,
@@ -313,6 +321,7 @@ class EvalMetrics(BaseModel):
             flakiness_rate=flakiness_rate,
             assertion_presence_rate=assertion_presence_rate,
             avg_assertions_per_test=avg_assertions_per_test,
+            avg_coverage_gain=avg_coverage_gain,
         )
 
     def to_markdown(self) -> str:
@@ -361,6 +370,8 @@ class EvalMetrics(BaseModel):
             lines.append(f"| Assertion presence | {self.assertion_presence_rate:.1%} |")
         if self.avg_assertions_per_test is not None:
             lines.append(f"| Avg assertions/test | {self.avg_assertions_per_test:.2f} |")
+        if self.avg_coverage_gain is not None:
+            lines.append(f"| Avg coverage gain | {self.avg_coverage_gain:+.2f} |")
         lines.append(f"| Avg iterations | {self.avg_iterations:.2f} |")
         lines.append(f"| Avg time (s) | {self.avg_time:.2f} |")
 

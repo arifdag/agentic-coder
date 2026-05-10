@@ -1,15 +1,15 @@
 """CLI entry point for the LLM Agent Platform."""
 
+import importlib.util
 import sys
 from pathlib import Path
 
 import click
 from rich.console import Console
-from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from .config import Config, LLMConfig
+from .config import Config
 from .graph.pipeline import run_pipeline
 from .utils.logging import ConsoleLogger
 
@@ -243,7 +243,7 @@ def generate(
         _print_summary(result)
 
     if not success:
-        console.print(f"\n[yellow]Warning: Tests may not be fully verified[/yellow]")
+        console.print("\n[yellow]Warning: Tests may not be fully verified[/yellow]")
         if result.get("error_message"):
             console.print(f"[yellow]Last error: {result['error_message']}[/yellow]")
         if verbose and result.get("verification_result"):
@@ -338,11 +338,9 @@ def check():
     except ImportError:
         checks.append(("langgraph", False, "Not installed"))
 
-    try:
-        import langchain_groq
-
+    if importlib.util.find_spec("langchain_groq"):
         checks.append(("langchain-groq", True, "Installed"))
-    except ImportError:
+    else:
         checks.append(("langchain-groq", False, "Not installed"))
 
     table = Table(title="Environment Check")
@@ -407,7 +405,21 @@ BENCHMARK_CHOICES = [
     "codejudgebench",
     "security",
     "dep_hallucination",
+    "testgeneval_lite",
+    "testgeneval",
+    "quixbugs",
     "all",
+]
+
+DEFAULT_ALL_BENCHMARKS = [
+    "ult",
+    "projecttest",
+    "cweval",
+    "codejudgebench",
+    "security",
+    "dep_hallucination",
+    "testgeneval_lite",
+    "quixbugs",
 ]
 
 
@@ -447,7 +459,7 @@ def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
     max_cases = max_cases or config.evaluation.max_cases
 
     if benchmark == "all":
-        names = [n for n in BENCHMARK_CHOICES if n != "all"]
+        names = list(DEFAULT_ALL_BENCHMARKS)
     else:
         names = [benchmark]
 
@@ -500,8 +512,8 @@ def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
 def ablation(benchmark, max_cases, axes, output_dir, provider, quality, variants, verbose):
     """Run ablation studies across config variants."""
     from .config import Config
-    from .evaluation.benchmarks import get_dataset
     from .evaluation.ablation import AblationRunner
+    from .evaluation.benchmarks import get_dataset
 
     config = Config.load(provider=provider)
     config.pipeline.verbose = verbose
@@ -513,7 +525,7 @@ def ablation(benchmark, max_cases, axes, output_dir, provider, quality, variants
     only_variants = [v.strip() for v in variants.split(",") if v.strip()] if variants else None
 
     if benchmark == "all":
-        names = [n for n in BENCHMARK_CHOICES if n != "all"]
+        names = list(DEFAULT_ALL_BENCHMARKS)
     else:
         names = [benchmark]
 
