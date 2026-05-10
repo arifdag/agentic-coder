@@ -7,29 +7,30 @@ Phase 5: Multi-language support (JS/TS via Jest).
 """
 
 import json
-from typing import TypedDict, Optional, List, Literal
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from langgraph.graph import StateGraph, END
+from datetime import datetime
+from typing import List, Literal, Optional, TypedDict
+
+from langgraph.graph import END, StateGraph
 from pydantic import BaseModel
 
-from ..agents.router import RouterAgent, TaskType, Language
-from ..agents.unit_test import UnitTestAgent, RepairContext
-from ..agents.ui_test import UITestAgent, UIRepairContext
-from ..agents.jest_test import JestTestAgent
 from ..agents.explanation import ExplanationAgent, ExplanationRepairContext
-from ..verification.sandbox import SandboxExecutor
-from ..verification.ui_sandbox import UITestExecutor
-from ..verification.js_sandbox import JsSandboxExecutor
-from ..verification.sast import SastAnalyzer
-from ..verification.dependency import DependencyValidator
-from ..verification.judge import SastJudge
-from ..verification.explanation_judge import ExplanationJudge
-from ..verification.complexity import ComplexityValidator
-from ..verification.relevance import RelevanceValidator
-from ..verification.models import GateResult, VerificationReport, Finding, Severity
+from ..agents.jest_test import JestTestAgent
+from ..agents.router import Language, RouterAgent, TaskType
+from ..agents.ui_test import UIRepairContext, UITestAgent
+from ..agents.unit_test import RepairContext, UnitTestAgent
+from ..config import Config, get_role_llm
 from ..utils.logging import AuditLogger
-from ..config import Config, get_llm, get_role_llm
+from ..verification.complexity import ComplexityValidator
+from ..verification.dependency import DependencyValidator
+from ..verification.explanation_judge import ExplanationJudge
+from ..verification.js_sandbox import JsSandboxExecutor
+from ..verification.judge import SastJudge
+from ..verification.models import Finding, GateResult, Severity, VerificationReport
+from ..verification.relevance import RelevanceValidator
+from ..verification.sandbox import SandboxExecutor
+from ..verification.sast import SastAnalyzer
+from ..verification.ui_sandbox import UITestExecutor
 
 JS_LANGUAGES = {Language.JAVASCRIPT.value, Language.TYPESCRIPT.value}
 
@@ -55,6 +56,7 @@ class PipelineState(TypedDict):
     target_url: Optional[str]
     html_content: Optional[str]
     description: Optional[str]
+    target_function: Optional[str]
 
     routing_decision: Optional[dict]
     task_type: Optional[str]
@@ -294,11 +296,12 @@ def create_pipeline(config: Optional[Config] = None):
             return dep_validator.validate(combined, language=lang)
 
         def run_relevance():
-            if not relevance_validator or is_ui:
+            if not relevance_validator or is_ui or lang in JS_LANGUAGES:
                 return None
             # Tests for explanation tasks aren't subject to relevance.
             return relevance_validator.validate(
                 test_code,
+                target_function=state.get("target_function"),
                 source_code=state["code_input"],
             )
 
@@ -436,6 +439,15 @@ def create_pipeline(config: Optional[Config] = None):
 
         prior_gates = state.get("gate_results") or []
         all_gates = prior_gates + [sandbox_gate.model_dump()]
+        if relevance_validator and result.success and task_type == TaskType.UNIT_TEST.value:
+            if lang not in JS_LANGUAGES:
+                target_gate = relevance_validator.validate_dynamic(
+                    test_code=test_code,
+                    source_code=state["code_input"],
+                    coverage_data=getattr(result, "coverage_data", None),
+                    target_function=state.get("target_function"),
+                )
+                all_gates.append(target_gate.model_dump())
 
         return {
             **state,
@@ -780,6 +792,7 @@ def run_pipeline(
     target_url: Optional[str] = None,
     html_content: Optional[str] = None,
     description: Optional[str] = None,
+    target_function: Optional[str] = None,
 ) -> PipelineState:
     """Run the pipeline on input code.
 
@@ -795,6 +808,7 @@ def run_pipeline(
         "target_url": target_url,
         "html_content": html_content,
         "description": description,
+        "target_function": target_function,
         "routing_decision": None,
         "task_type": None,
         "language": None,

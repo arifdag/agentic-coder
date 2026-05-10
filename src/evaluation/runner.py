@@ -13,6 +13,7 @@ from .quality import (
     compute_oracle_metrics,
     compute_relevance_metrics,
     generate_python_mutants,
+    infer_primary_target,
 )
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class BenchmarkRunner:
                 file_path=None,
                 max_retries=self.config.pipeline.max_retries,
                 config=self.config,
+                target_function=infer_primary_target(case.code, case.metadata),
             )
             elapsed = time.time() - start
 
@@ -136,6 +138,10 @@ class BenchmarkRunner:
             )
 
         gate_metrics = compute_gate_quality_metrics(gates, case.metadata)
+        sandbox_passed = next(
+            (bool(g.get("passed")) for g in gates if g.get("gate_name") == "sandbox"),
+            passed,
+        )
         mutation_metrics: dict[str, Any] = {}
         if mode == "full" and case.language.lower() == "python":
             limit = getattr(self.config.evaluation, "mutation_max_mutants", 25)
@@ -167,7 +173,8 @@ class BenchmarkRunner:
                 test_code,
                 case.code,
                 case.metadata,
-                passed=passed,
+                passed=sandbox_passed,
+                coverage_data=state.get("sandbox_coverage_data"),
             ),
             "safety_metrics": gate_metrics["safety_metrics"],
             "dependency_metrics": gate_metrics["dependency_metrics"],

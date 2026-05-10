@@ -1,37 +1,60 @@
-"""Gate: Test-relevance validation.
+"""Gate: target relevance validation for generated tests.
 
-Self-evaluating test generation has a well-known failure mode: the LLM can
-satisfy the "all tests pass" criterion by writing tests for a *fictional*
-class/function instead of the actual function under test, then writing the
-fictional implementation to make those tests pass. The sandbox happily
-reports 100% pass because the (fake) tests pass against the (fake) code.
+The gate is intentionally split into two checks:
 
-We measured this on ULT: at k=5 with no other gates, ~33% of "passing"
-cases had zero tests that referenced the target function name.
+* a static pre-sandbox check that catches obvious gaming cheaply; and
+* a dynamic post-sandbox check that confirms the target lines executed when
+  coverage.py JSON is available.
 
-This validator catches that. Given the source code (or a target function
-name) and the generated test code, it checks:
-
-  1. Does the test code import from ``source_module`` (or whichever
-     module the pipeline placed the source under)?
-  2. Does at least one test name reference the target function?
-  3. If the test file *re-defines* a class or function with the same name
-     as the import target, that's a stronger gaming signal -- flag it.
-
-It is intentionally conservative: many true-positive tests share a
-function name and import the source module. Only when *none* of these
-signals is present do we fail the gate.
+This keeps the Generate-Detect-Repair loop fast while avoiding the old failure
+mode where a test name or a dummy import was enough to pass relevance.
 """
+
 from __future__ import annotations
 
 import ast
+import json
 import re
-from typing import Iterable, Optional
+from dataclasses import asdict, dataclass
+from pathlib import PurePath
+from typing import Any, Iterable, Optional
 
-from .models import GateResult, Finding, Severity
-
+from .models import Finding, GateResult, Severity
 
 _DEFAULT_SOURCE_MODULE = "source_module"
+
+
+@dataclass(frozen=True)
+class TargetInfo:
+    """Inferred target definition in the source-under-test."""
+
+    name: str
+    kind: str = "unknown"
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    executable_lines: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class RelevanceAnalysis:
+    """Static relevance evidence extracted from generated test code."""
+
+    eligible: bool
+    passed: bool
+    target: Optional[str]
+    targets: tuple[str, ...]
+    score: int
+    strong_signal_count: int
+    signals: dict[str, bool]
+    negative_signals: dict[str, bool]
+    test_count: int
+    assertion_count: int
+    dummy_assertion_count: int
+    details: str
+    error: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _camel_split(name: str) -> list[str]:
@@ -52,33 +75,125 @@ def _candidate_keywords(target: str) -> list[str]:
     return [k for k in base if k]
 
 
-def _imports_source_module(tree: ast.AST, source_module: str) -> bool:
+def _node_span(node: ast.AST) -> tuple[Optional[int], Optional[int]]:
+    start = getattr(node, "lineno", None)
+    end = getattr(node, "end_lineno", None)
+    if end is None:
+        lines = [
+            lineno
+            for child in ast.walk(node)
+            if isinstance((lineno := getattr(child, "lineno", None)), int)
+        ]
+        end = max(lines) if lines else start
+    return start, end
+
+
+def _node_executable_lines(node: ast.AST) -> tuple[int, ...]:
+    lines = {
+        lineno
+        for child in ast.walk(node)
+        if isinstance((lineno := getattr(child, "lineno", None)), int)
+    }
+    for child in ast.walk(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            lineno = getattr(child, "lineno", None)
+            if isinstance(lineno, int):
+                lines.discard(lineno)
+            for decorator in getattr(child, "decorator_list", []):
+                decorator_line = getattr(decorator, "lineno", None)
+                if isinstance(decorator_line, int):
+                    lines.discard(decorator_line)
+    return tuple(sorted(lines))
+
+
+def _target_from_node(node: ast.AST) -> Optional[TargetInfo]:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return None
+    start, end = _node_span(node)
+    return TargetInfo(
+        name=node.name,
+        kind="class" if isinstance(node, ast.ClassDef) else "function",
+        start_line=start,
+        end_line=end,
+        executable_lines=_node_executable_lines(node),
+    )
+
+
+def infer_target_infos(
+    source_code: str,
+    target_function: Optional[str] = None,
+) -> list[TargetInfo]:
+    """Infer source targets from an explicit name or the first top-level definition."""
+    target_name = target_function.strip() if isinstance(target_function, str) else None
+    try:
+        tree = ast.parse(source_code or "")
+    except SyntaxError:
+        return [TargetInfo(name=target_name)] if target_name else []
+
+    top_level = [
+        info for node in ast.iter_child_nodes(tree) if (info := _target_from_node(node)) is not None
+    ]
+    if target_name:
+        lowered = target_name.lower()
+        matches = [info for info in top_level if info.name.lower() == lowered]
+        return matches or [TargetInfo(name=target_name)]
+    return top_level[:1]
+
+
+def _imports_source_module(tree: ast.AST, source_module: str) -> tuple[bool, set[str]]:
+    aliases: set[str] = set()
+    imported = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == source_module or alias.name.startswith(f"{source_module}."):
-                    return True
+                if alias.name == source_module:
+                    imported = True
+                    aliases.add(alias.asname or source_module)
+                elif alias.name.startswith(f"{source_module}."):
+                    imported = True
+                    aliases.add(alias.asname or alias.name.split(".")[-1])
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             if mod == source_module or mod.startswith(f"{source_module}."):
-                return True
-            # ``from . import source_module`` style
+                imported = True
             for alias in node.names:
                 if alias.name == source_module:
-                    return True
-    return False
+                    imported = True
+                    aliases.add(alias.asname or source_module)
+    return imported, aliases
 
 
-def _imported_target_names(tree: ast.AST, source_module: str) -> set[str]:
-    """Names brought in via ``from source_module import X``."""
-    out: set[str] = set()
+def _imported_target_aliases(
+    tree: ast.AST,
+    source_module: str,
+    targets: Iterable[str],
+) -> set[str]:
+    """Names brought in via ``from source_module import target``."""
+    target_lowers = {target.lower() for target in targets}
+    aliases: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            if mod == source_module or mod.startswith(f"{source_module}."):
-                for alias in node.names:
-                    out.add(alias.asname or alias.name)
-    return out
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        mod = node.module or ""
+        if mod != source_module and not mod.startswith(f"{source_module}."):
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            if alias.name.lower() in target_lowers:
+                aliases.add(alias.asname or alias.name)
+    return aliases
+
+
+def _has_wildcard_source_import(tree: ast.AST, source_module: str) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if (node.module or "") != source_module:
+            continue
+        if any(alias.name == "*" for alias in node.names):
+            return True
+    return False
 
 
 def _test_function_names(tree: ast.AST) -> list[str]:
@@ -87,37 +202,309 @@ def _test_function_names(tree: ast.AST) -> list[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name.startswith("test_"):
                 names.append(node.name)
-        elif isinstance(node, ast.ClassDef):
-            if node.name.startswith("Test"):
-                for inner in node.body:
-                    if (
-                        isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
-                        and inner.name.startswith("test_")
-                    ):
-                        names.append(f"{node.name}.{inner.name}")
     return names
 
 
-def _redefined_target_names(tree: ast.AST, target: str) -> bool:
-    """Returns True if the test file *also* defines a top-level
-    function/class with the exact target name -- a strong gaming signal."""
-    target_lower = target.lower()
+def _redefined_target_names(tree: ast.AST, targets: Iterable[str]) -> bool:
+    target_lowers = {target.lower() for target in targets}
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == target or node.name.lower() == target_lower:
+            if node.name.lower() in target_lowers:
                 return True
     return False
 
 
-class RelevanceValidator:
-    """Detects tests that don't actually exercise the function under test.
+def _is_unittest_assert_call(node: ast.Call) -> bool:
+    return isinstance(node.func, ast.Attribute) and node.func.attr.startswith("assert")
 
-    Args:
-        source_module: The Python module name the pipeline writes the
-            source-under-test to (default ``source_module``).
-        min_relevance_signals: How many of the three checks must succeed
-            for the gate to pass. Default 1 (any signal is enough).
-    """
+
+def _is_pytest_raises_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "raises"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pytest"
+    )
+
+
+def _is_dummy_assert(node: ast.Assert) -> bool:
+    test = node.test
+    if isinstance(test, ast.Constant):
+        return bool(test.value) is True
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and len(test.comparators) == 1:
+        left = test.left
+        right = test.comparators[0]
+        if isinstance(left, ast.Constant) and isinstance(right, ast.Constant):
+            try:
+                return bool(eval(compile(ast.Expression(test), "<relevance>", "eval"))) is True
+            except Exception:
+                return False
+    return False
+
+
+def _assertion_counts(tree: ast.AST) -> tuple[int, int]:
+    assert_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+    call_asserts = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (_is_unittest_assert_call(node) or _is_pytest_raises_call(node))
+    ]
+    return len(assert_nodes) + len(call_asserts), sum(
+        1 for node in assert_nodes if _is_dummy_assert(node)
+    )
+
+
+def _call_target_signals(
+    tree: ast.AST,
+    targets: Iterable[str],
+    imported_aliases: set[str],
+    module_aliases: set[str],
+    wildcard_imported: bool,
+) -> tuple[bool, bool, bool]:
+    target_lowers = {target.lower() for target in targets}
+    imported_lowers = {alias.lower() for alias in imported_aliases}
+    direct_call = False
+    module_call = False
+    instantiated_target = False
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            name = func.id.lower()
+            if name in imported_lowers or (wildcard_imported and name in target_lowers):
+                direct_call = True
+                instantiated_target = True
+            elif name in target_lowers:
+                direct_call = True
+                instantiated_target = True
+        elif isinstance(func, ast.Attribute):
+            value = func.value
+            if isinstance(value, ast.Name) and value.id in module_aliases:
+                if func.attr.lower() in target_lowers:
+                    module_call = True
+                    instantiated_target = True
+            if func.attr.lower() in target_lowers:
+                direct_call = True
+
+    return direct_call, module_call, instantiated_target
+
+
+def analyze_relevance(
+    test_code: str,
+    source_code: Optional[str] = None,
+    target_function: Optional[str] = None,
+    *,
+    source_module: str = _DEFAULT_SOURCE_MODULE,
+    min_relevance_signals: int = 1,
+) -> RelevanceAnalysis:
+    """Analyze static test relevance using balanced anti-gaming evidence."""
+    if not test_code or not test_code.strip():
+        return RelevanceAnalysis(
+            eligible=True,
+            passed=False,
+            target=target_function,
+            targets=tuple([target_function] if target_function else []),
+            score=0,
+            strong_signal_count=0,
+            signals={},
+            negative_signals={"empty_tests": True},
+            test_count=0,
+            assertion_count=0,
+            dummy_assertion_count=0,
+            details="empty test_code",
+            error="empty_tests",
+        )
+
+    try:
+        tree = ast.parse(test_code)
+    except SyntaxError as exc:
+        return RelevanceAnalysis(
+            eligible=True,
+            passed=False,
+            target=target_function,
+            targets=tuple([target_function] if target_function else []),
+            score=0,
+            strong_signal_count=0,
+            signals={},
+            negative_signals={"syntax_error": True},
+            test_count=0,
+            assertion_count=0,
+            dummy_assertion_count=0,
+            details=str(exc),
+            error="test_syntax_error",
+        )
+
+    targets = tuple(info.name for info in infer_target_infos(source_code or "", target_function))
+    test_names = _test_function_names(tree)
+    assertion_count, dummy_assertion_count = _assertion_counts(tree)
+    imports_source, module_aliases = _imports_source_module(tree, source_module)
+    wildcard_imported = _has_wildcard_source_import(tree, source_module)
+    imported_aliases = _imported_target_aliases(tree, source_module, targets)
+
+    keywords: list[str] = []
+    for target in targets:
+        keywords.extend(_candidate_keywords(target))
+    keywords = list(dict.fromkeys(keywords))
+    test_name_references_target = bool(keywords) and any(
+        any(keyword in name.lower() for keyword in keywords) for name in test_names
+    )
+
+    direct_call, module_call, instantiated_target = _call_target_signals(
+        tree,
+        targets,
+        imported_aliases,
+        module_aliases,
+        wildcard_imported,
+    )
+    target_redefined = bool(targets) and _redefined_target_names(tree, targets)
+
+    signals = {
+        "imports_source_module": imports_source,
+        "imports_target_name": bool(imported_aliases),
+        "wildcard_source_import": wildcard_imported,
+        "test_name_references_target": test_name_references_target,
+        "calls_target_directly": direct_call,
+        "calls_target_via_module": module_call,
+        "instantiates_target": instantiated_target,
+    }
+    negative_signals = {
+        "no_test_functions": not test_names,
+        "no_assertions": assertion_count == 0,
+        "dummy_assertions_only": assertion_count > 0 and dummy_assertion_count == assertion_count,
+        "target_redefined": target_redefined and not bool(imported_aliases),
+    }
+
+    strong_signal_count = sum(
+        1
+        for key in (
+            "imports_target_name",
+            "calls_target_directly",
+            "calls_target_via_module",
+            "instantiates_target",
+        )
+        if signals[key]
+    )
+    score = (
+        (2 if signals["calls_target_directly"] else 0)
+        + (2 if signals["calls_target_via_module"] else 0)
+        + (2 if signals["instantiates_target"] else 0)
+        + (1 if signals["imports_target_name"] else 0)
+        + (1 if signals["wildcard_source_import"] else 0)
+        + (1 if signals["imports_source_module"] else 0)
+        + (1 if signals["test_name_references_target"] else 0)
+    )
+
+    if not targets:
+        static_passed = imports_source and bool(test_names)
+    else:
+        static_passed = (
+            score >= max(1, int(min_relevance_signals))
+            and strong_signal_count > 0
+            and not any(negative_signals.values())
+        )
+
+    details = (
+        f"score={score}; strong={strong_signal_count}; signals={json.dumps(signals, sort_keys=True)}; "
+        f"negative={json.dumps(negative_signals, sort_keys=True)}; targets={list(targets)}"
+    )
+    return RelevanceAnalysis(
+        eligible=True,
+        passed=static_passed,
+        target=targets[0] if targets else None,
+        targets=targets,
+        score=score,
+        strong_signal_count=strong_signal_count,
+        signals=signals,
+        negative_signals=negative_signals,
+        test_count=len(test_names),
+        assertion_count=assertion_count,
+        dummy_assertion_count=dummy_assertion_count,
+        details=details,
+    )
+
+
+def _coverage_file_entry(coverage_data: dict | None, source_module: str) -> Optional[dict]:
+    if not isinstance(coverage_data, dict):
+        return None
+    files = coverage_data.get("files")
+    if not isinstance(files, dict):
+        return None
+    expected = f"{source_module}.py"
+    for path, entry in files.items():
+        name = PurePath(str(path).replace("\\", "/")).name
+        if name == expected:
+            return entry if isinstance(entry, dict) else None
+    return None
+
+
+def compute_target_coverage(
+    coverage_data: dict | None,
+    source_code: str,
+    target_function: Optional[str] = None,
+    *,
+    source_module: str = _DEFAULT_SOURCE_MODULE,
+) -> dict[str, Any]:
+    """Compute target-line and target-branch coverage from coverage.py JSON."""
+    targets = infer_target_infos(source_code, target_function)
+    target = targets[0] if targets else None
+    out: dict[str, Any] = {
+        "target": target.name if target else target_function,
+        "target_kind": target.kind if target else None,
+        "target_start_line": target.start_line if target else None,
+        "target_end_line": target.end_line if target else None,
+        "target_line_coverage": None,
+        "target_branch_coverage": None,
+        "target_executed_line_count": 0,
+        "target_executable_line_count": len(target.executable_lines) if target else 0,
+    }
+    if not target or not target.executable_lines:
+        return out
+
+    entry = _coverage_file_entry(coverage_data, source_module)
+    if not entry:
+        return out
+
+    executed = {
+        int(line)
+        for line in entry.get("executed_lines", [])
+        if isinstance(line, (int, float)) and not isinstance(line, bool)
+    }
+    target_lines = set(target.executable_lines)
+    executed_target_lines = executed & target_lines
+    out["target_executed_line_count"] = len(executed_target_lines)
+    out["target_line_coverage"] = (
+        len(executed_target_lines) / len(target_lines) * 100.0 if target_lines else None
+    )
+
+    executed_branches = entry.get("executed_branches") or []
+    missing_branches = entry.get("missing_branches") or []
+    target_executed_branches = {
+        tuple(branch)
+        for branch in executed_branches
+        if isinstance(branch, list)
+        and len(branch) == 2
+        and isinstance(branch[0], int)
+        and branch[0] in target_lines
+    }
+    target_missing_branches = {
+        tuple(branch)
+        for branch in missing_branches
+        if isinstance(branch, list)
+        and len(branch) == 2
+        and isinstance(branch[0], int)
+        and branch[0] in target_lines
+    }
+    target_branch_total = len(target_executed_branches | target_missing_branches)
+    if target_branch_total:
+        out["target_branch_coverage"] = len(target_executed_branches) / target_branch_total * 100.0
+    return out
+
+
+class RelevanceValidator:
+    """Detect tests that don't actually exercise the function under test."""
 
     def __init__(
         self,
@@ -134,191 +521,158 @@ class RelevanceValidator:
         *,
         source_code: Optional[str] = None,
     ) -> GateResult:
-        """Evaluate test relevance to the source under test.
+        """Evaluate static relevance before sandbox execution."""
+        analysis = analyze_relevance(
+            test_code,
+            source_code=source_code,
+            target_function=target_function,
+            source_module=self.source_module,
+            min_relevance_signals=self.min_relevance_signals,
+        )
+        findings = self._analysis_findings(analysis)
+        return GateResult(
+            gate_name="relevance",
+            passed=analysis.passed,
+            findings=findings,
+            details=analysis.details,
+        )
 
-        Args:
-            test_code: The generated test file content.
-            target_function: Name of the function that should be exercised.
-                If None, only the import-from-source check is performed.
-            source_code: Optional source code; used to auto-detect the
-                target function name(s) when ``target_function`` isn't
-                provided (we pick the first top-level ``def`` we find).
-        """
-        if not test_code or not test_code.strip():
-            return GateResult(
-                gate_name="relevance",
-                passed=False,
-                findings=[Finding(
+    def validate_dynamic(
+        self,
+        test_code: str,
+        source_code: str,
+        coverage_data: dict | None,
+        target_function: Optional[str] = None,
+    ) -> GateResult:
+        """Evaluate post-sandbox relevance using target coverage evidence."""
+        analysis = analyze_relevance(
+            test_code,
+            source_code=source_code,
+            target_function=target_function,
+            source_module=self.source_module,
+            min_relevance_signals=self.min_relevance_signals,
+        )
+        target_cov = compute_target_coverage(
+            coverage_data,
+            source_code,
+            target_function=target_function,
+            source_module=self.source_module,
+        )
+        findings = self._analysis_findings(analysis)
+        target_line_coverage = target_cov.get("target_line_coverage")
+
+        if target_cov.get("target") is None:
+            findings.append(
+                Finding(
+                    severity=Severity.WARNING,
+                    code="target_unknown",
+                    message="Could not infer a target definition for dynamic relevance.",
+                )
+            )
+            passed = analysis.passed
+        elif target_line_coverage is None:
+            findings.append(
+                Finding(
+                    severity=Severity.WARNING,
+                    code="target_coverage_unavailable",
+                    message="Coverage JSON did not contain executable target-line data.",
+                )
+            )
+            passed = analysis.passed and analysis.strong_signal_count > 0
+        elif float(target_line_coverage) <= 0.0:
+            findings.append(
+                Finding(
+                    severity=Severity.ERROR,
+                    code="target_not_executed",
+                    message=(
+                        "Generated tests passed, but coverage shows zero executed "
+                        "lines in the inferred target."
+                    ),
+                    suggestion="Call or instantiate the original target from source_module in an assertion.",
+                )
+            )
+            passed = False
+        else:
+            passed = analysis.passed
+
+        return GateResult(
+            gate_name="target_relevance",
+            passed=passed,
+            findings=findings,
+            details=f"{analysis.details}; target_coverage={json.dumps(target_cov, sort_keys=True)}",
+        )
+
+    def _analysis_findings(self, analysis: RelevanceAnalysis) -> list[Finding]:
+        findings: list[Finding] = []
+        negatives = analysis.negative_signals
+        if analysis.error == "empty_tests":
+            findings.append(
+                Finding(
                     severity=Severity.ERROR,
                     code="empty_tests",
                     message="No test code was generated.",
-                )],
-                details="empty test_code",
+                )
             )
-
-        try:
-            tree = ast.parse(test_code)
-        except SyntaxError as exc:
-            return GateResult(
-                gate_name="relevance",
-                passed=False,
-                findings=[Finding(
+        if analysis.error == "test_syntax_error":
+            findings.append(
+                Finding(
                     severity=Severity.ERROR,
                     code="test_syntax_error",
-                    message=f"Cannot parse test code: {exc.msg}",
-                    line=exc.lineno,
-                )],
-                details=str(exc),
+                    message=f"Cannot parse test code: {analysis.details}",
+                )
             )
-
-        # Auto-detect target function from source_code if none provided
-        target_candidates: list[str] = []
-        if target_function:
-            target_candidates.append(target_function)
-        elif source_code:
-            try:
-                src_tree = ast.parse(source_code)
-                for n in ast.iter_child_nodes(src_tree):
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        target_candidates.append(n.name)
-                        break
-            except SyntaxError:
-                pass
-
-        test_names = _test_function_names(tree)
-        if not test_names:
-            return GateResult(
-                gate_name="relevance",
-                passed=False,
-                findings=[Finding(
+        if negatives.get("no_test_functions"):
+            findings.append(
+                Finding(
                     severity=Severity.ERROR,
                     code="no_test_functions",
-                    message=(
-                        "No test functions or test classes found in the "
-                        "generated test code (no test_* functions or Test* "
-                        "classes)"
-                    ),
-                    suggestion=(
-                        "Ensure the test file defines at least one function "
-                        "named test_* or a class named Test* with test_* "
-                        "methods"
-                    ),
-                )],
-                details="zero test functions",
+                    message="No test_* functions or Test* methods were found.",
+                    suggestion="Define at least one pytest-discoverable test function.",
+                )
             )
-
-        test_names = _test_function_names(tree)
-        if not test_names:
-            return GateResult(
-                gate_name="relevance",
-                passed=False,
-                findings=[Finding(
+        if negatives.get("no_assertions"):
+            findings.append(
+                Finding(
                     severity=Severity.ERROR,
-                    code="no_test_functions",
-                    message=(
-                        "No test functions or test classes found in the "
-                        "generated test code (no test_* functions or Test* "
-                        "classes)"
-                    ),
-                    suggestion=(
-                        "Ensure the test file defines at least one function "
-                        "named test_* or a class named Test* with test_* "
-                        "methods"
-                    ),
-                )],
-                details="zero test functions",
+                    code="no_assertions",
+                    message="Generated tests do not contain assertions or pytest.raises checks.",
+                    suggestion="Assert observable behavior of the original target.",
+                )
             )
-
-        signals: dict[str, bool] = {
-            "imports_source_module": _imports_source_module(tree, self.source_module),
-            "test_name_references_target": False,
-            "imports_target_name": False,
-        }
-        findings: list[Finding] = []
-
-        if target_candidates:
-            keywords = []
-            for tgt in target_candidates:
-                keywords.extend(_candidate_keywords(tgt))
-            keywords = list(dict.fromkeys(keywords))  # dedup, preserve order
-
-            for name in test_names:
-                nl = name.lower()
-                if any(kw in nl for kw in keywords):
-                    signals["test_name_references_target"] = True
-                    break
-
-            imported = _imported_target_names(tree, self.source_module)
-            for tgt in target_candidates:
-                if tgt in imported or tgt.lower() in {n.lower() for n in imported}:
-                    signals["imports_target_name"] = True
-                    break
-
-            # Strong gaming signal: test file *redefines* the target locally
-            for tgt in target_candidates:
-                if _redefined_target_names(tree, tgt) and not signals["imports_target_name"]:
-                    findings.append(Finding(
-                        severity=Severity.WARNING,
-                        code="target_shadowed_in_tests",
-                        message=(
-                            f"Target '{tgt}' appears to be redefined in the test "
-                            "file rather than imported from source. Tests may be "
-                            "validating a fictional implementation."
-                        ),
-                    ))
-
-        test_names = _test_function_names(tree)
-        if not test_names:
-            # Zero test_* functions or Test* classes found. This is the
-            # "collected 0 items" case -- the LLM produced a file that
-            # pytest can't even collect. Flag it here so the repair loop
-            # gets a clear message instead of falling through to the
-            # sandbox with an empty finding.
-            return GateResult(
-                gate_name="relevance",
-                passed=False,
-                findings=[Finding(
+        if negatives.get("dummy_assertions_only"):
+            findings.append(
+                Finding(
                     severity=Severity.ERROR,
-                    code="no_test_functions",
+                    code="dummy_assertions_only",
+                    message="Generated tests only contain dummy assertions.",
+                    suggestion="Replace dummy assertions with checks against source_module behavior.",
+                )
+            )
+        if negatives.get("target_redefined"):
+            findings.append(
+                Finding(
+                    severity=Severity.ERROR,
+                    code="target_shadowed_in_tests",
                     message=(
-                        "No test functions or test classes found in the "
-                        "generated test code (no test_* functions or Test* "
-                        "classes)"
+                        "The target appears to be redefined in the test file rather "
+                        "than imported from source_module."
+                    ),
+                    suggestion="Import and exercise the original target from source_module.",
+                )
+            )
+        if not analysis.passed and not findings:
+            findings.append(
+                Finding(
+                    severity=Severity.ERROR,
+                    code="tests_unrelated_to_source",
+                    message=(
+                        "Generated tests do not provide strong evidence that they "
+                        "exercise the original target."
                     ),
                     suggestion=(
-                        "Ensure the test file defines at least one function "
-                        "named test_* or a class named Test* with test_* "
-                        "methods"
+                        f"Import the target from '{self.source_module}' and call it "
+                        "inside an assertion."
                     ),
-                )],
-                details="zero test functions",
+                )
             )
-
-
-        passed_signals = sum(1 for v in signals.values() if v)
-        passed = passed_signals >= self.min_relevance_signals
-
-        if not passed:
-            findings.append(Finding(
-                severity=Severity.ERROR,
-                code="tests_unrelated_to_source",
-                message=(
-                    "Generated tests appear unrelated to the function under "
-                    f"test. None of {sorted(signals)} succeeded "
-                    f"(target={target_candidates or 'unknown'})."
-                ),
-                suggestion=(
-                    f"Ensure tests import from '{self.source_module}' and "
-                    "exercise the original function names."
-                ),
-            ))
-
-        return GateResult(
-            gate_name="relevance",
-            passed=passed,
-            findings=findings,
-            details=(
-                f"signals={signals}; targets={target_candidates}; "
-                f"min_required={self.min_relevance_signals}"
-            ),
-        )
+        return findings

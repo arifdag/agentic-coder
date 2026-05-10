@@ -1,14 +1,9 @@
 """Tests for the Phase 2 verification layer."""
 
-import pytest
-
-from src.verification.models import (
-    Finding, GateResult, VerificationReport,
-    Severity, JudgeVerdict,
-)
 from src.verification.dependency import DependencyValidator, extract_imports
-from src.verification.sast import SastAnalyzer
+from src.verification.models import Finding, GateResult, JudgeVerdict, Severity, VerificationReport
 from src.verification.relevance import RelevanceValidator
+from src.verification.sast import SastAnalyzer
 
 
 class TestModels:
@@ -28,7 +23,8 @@ class TestModels:
         findings = [
             Finding(severity=Severity.ERROR, message="real issue"),
             Finding(
-                severity=Severity.ERROR, message="false alarm",
+                severity=Severity.ERROR,
+                message="false alarm",
                 judge_verdict=JudgeVerdict.FALSE_POSITIVE,
             ),
             Finding(severity=Severity.WARNING, message="minor thing"),
@@ -43,15 +39,15 @@ class TestModels:
         """Regression: WARNING-level SAST hits (e.g. SQL injection in Bandit MEDIUM)
         must be treated as blocking so the repair loop acts on them."""
         findings = [
-            Finding(severity=Severity.ERROR, code="CWE-78",
-                    message="shell=True"),
-            Finding(severity=Severity.WARNING, code="CWE-89",
-                    message="SQL injection vector"),
-            Finding(severity=Severity.WARNING, code="CWE-327",
-                    message="Weak hash MD5",
-                    judge_verdict=JudgeVerdict.FALSE_POSITIVE),
-            Finding(severity=Severity.INFO, code="CWE-703",
-                    message="Use of assert"),
+            Finding(severity=Severity.ERROR, code="CWE-78", message="shell=True"),
+            Finding(severity=Severity.WARNING, code="CWE-89", message="SQL injection vector"),
+            Finding(
+                severity=Severity.WARNING,
+                code="CWE-327",
+                message="Weak hash MD5",
+                judge_verdict=JudgeVerdict.FALSE_POSITIVE,
+            ),
+            Finding(severity=Severity.INFO, code="CWE-703", message="Use of assert"),
         ]
         gate = GateResult(gate_name="sast", passed=False, findings=findings)
 
@@ -77,7 +73,8 @@ class TestModels:
     def test_verification_report_fails_if_any_gate_fails(self):
         g1 = GateResult(gate_name="sast", passed=True, findings=[])
         g2 = GateResult(
-            gate_name="dependency", passed=False,
+            gate_name="dependency",
+            passed=False,
             findings=[Finding(severity=Severity.ERROR, message="phantom package")],
         )
         report = VerificationReport.from_gates([g1, g2])
@@ -85,7 +82,8 @@ class TestModels:
 
     def test_format_for_repair(self):
         g1 = GateResult(
-            gate_name="sast", passed=False,
+            gate_name="sast",
+            passed=False,
             findings=[
                 Finding(
                     severity=Severity.ERROR,
@@ -95,9 +93,7 @@ class TestModels:
                 ),
             ],
         )
-        report = VerificationReport.from_gates(
-            [g1], coverage_gaps="12, 15-18"
-        )
+        report = VerificationReport.from_gates([g1], coverage_gaps="12, 15-18")
         text = report.format_for_repair()
 
         assert "[GATE: sast] FAIL" in text
@@ -189,7 +185,8 @@ def test_add():
         result = analyzer.analyze(code)
         assert result.gate_name == "sast"
         real_errors = [
-            f for f in result.findings
+            f
+            for f in result.findings
             if f.severity == Severity.ERROR and "not installed" not in f.message
         ]
         assert len(real_errors) == 0
@@ -207,16 +204,14 @@ def test_add():
         code = (
             "import sqlite3\n"
             "def get_user(conn, user_id):\n"
-            "    q = \"SELECT * FROM users WHERE id = '\" + user_id + \"'\"\n"
+            '    q = "SELECT * FROM users WHERE id = \'" + user_id + "\'"\n'
             "    return conn.execute(q).fetchall()\n"
         )
         result = analyzer.analyze(code)
-        real_findings = [
-            f for f in result.findings
-            if "not installed" not in f.message
-        ]
+        real_findings = [f for f in result.findings if "not installed" not in f.message]
         if not real_findings:
             import pytest
+
             pytest.skip("neither semgrep nor bandit detected anything on this host")
         assert result.passed is False, (
             "SAST gate should fail when SQL-injection pattern is detected "
@@ -236,15 +231,13 @@ def test_add():
             "    assert add(0, 0) == 0\n"
         )
         result = analyzer.analyze(code)
-        blocking = [
-            f for f in result.findings
-            if f.severity in (Severity.ERROR, Severity.WARNING)
-        ]
-        assert all((f.code or "").upper() not in ("CWE-703", "B101")
-                   for f in result.findings), \
-            "CWE-703/B101 should be filtered out"
-        assert result.passed is True or len(blocking) == 0, \
-            "assert-only test code should not fail the SAST gate"
+        blocking = [f for f in result.findings if f.severity in (Severity.ERROR, Severity.WARNING)]
+        assert all(
+            (f.code or "").upper() not in ("CWE-703", "B101") for f in result.findings
+        ), "CWE-703/B101 should be filtered out"
+        assert (
+            result.passed is True or len(blocking) == 0
+        ), "assert-only test code should not fail the SAST gate"
 
 
 class TestSandboxFixImports:
@@ -261,6 +254,7 @@ class TestSandboxFixImports:
 
     def _fix(self, code: str) -> str:
         from src.verification.sandbox import SandboxExecutor
+
         return SandboxExecutor()._fix_imports(code)
 
     def test_multiline_paren_import_from_unknown_module_is_rewritten_cleanly(self):
@@ -280,6 +274,7 @@ class TestSandboxFixImports:
         fixed = self._fix(code)
         # Must be parseable
         import ast
+
         ast.parse(fixed)
         assert "from source_module import *" in fixed
         # No dangling indented orphan lines left behind
@@ -300,6 +295,7 @@ class TestSandboxFixImports:
         )
         fixed = self._fix(code)
         import ast
+
         ast.parse(fixed)
         assert "from source_module import *" in fixed
         # The unknown module itself should be gone
@@ -318,6 +314,7 @@ class TestSandboxFixImports:
         )
         fixed = self._fix(code)
         import ast
+
         ast.parse(fixed)
         assert "from typing import" in fixed
         assert "List" in fixed and "Dict" in fixed
@@ -368,7 +365,7 @@ class TestRelevanceValidator:
         codes = {f.code for f in result.findings}
         assert "tests_unrelated_to_source" in codes
 
-    def test_target_redefined_locally_is_warned(self):
+    def test_target_redefined_locally_is_blocked(self):
         v = RelevanceValidator()
         test = (
             "def DetPiece(x):\n"
@@ -378,25 +375,91 @@ class TestRelevanceValidator:
             "    assert DetPiece('P1') == ('Pawn', True)\n"
         )
         result = v.validate(test, target_function="DetPiece")
-        warning_codes = {f.code for f in result.findings if f.severity == Severity.WARNING}
-        assert "target_shadowed_in_tests" in warning_codes
+        assert not result.passed
+        codes = {f.code for f in result.findings}
+        assert "target_shadowed_in_tests" in codes
 
-    def test_test_name_reference_alone_is_enough(self):
+    def test_test_name_reference_alone_is_not_enough(self):
+        v = RelevanceValidator()
+        test = "def test_detpiece_returns_tuple():\n" "    value = 1\n" "    assert value == 1\n"
+        result = v.validate(test, target_function="DetPiece")
+        assert not result.passed
+        assert any(f.code == "tests_unrelated_to_source" for f in result.findings)
+
+    def test_camelcase_split_keyword_without_target_call_is_not_enough(self):
+        v = RelevanceValidator()
+        test = "def test_det_piece_logic():\n" "    value = 1\n" "    assert value == 1\n"
+        result = v.validate(test, target_function="DetPiece")
+        assert not result.passed
+
+    def test_calls_target_signal_passes(self):
         v = RelevanceValidator()
         test = (
-            "def test_detpiece_returns_tuple():\n"
-            "    pass\n"
+            "from source_module import add\n"
+            "\n"
+            "def test_basic_math():\n"
+            "    assert add(1, 2) == 3\n"
         )
-        result = v.validate(test, target_function="DetPiece")
+        result = v.validate(test, target_function="add")
         assert result.passed
 
-    def test_camelcase_split_keywords_match(self):
+    def test_module_target_call_signal_passes(self):
         v = RelevanceValidator()
         test = (
-            "def test_det_piece_logic():\n"
-            "    pass\n"
+            "import source_module as sm\n"
+            "\n"
+            "def test_basic_math():\n"
+            "    assert sm.add(1, 2) == 3\n"
         )
-        result = v.validate(test, target_function="DetPiece")
+        result = v.validate(test, target_function="add")
+        assert result.passed
+
+    def test_dynamic_relevance_fails_when_target_not_executed(self):
+        v = RelevanceValidator()
+        source = "def add(a, b):\n    return a + b\n\ndef helper():\n    return 1\n"
+        test = (
+            "from source_module import add\n"
+            "\n"
+            "def test_basic_math():\n"
+            "    assert add is not None\n"
+        )
+        coverage = {
+            "files": {
+                "source_module.py": {
+                    "executed_lines": [4, 5],
+                    "missing_lines": [1, 2],
+                }
+            }
+        }
+        result = v.validate_dynamic(test, source, coverage, target_function="add")
+        assert not result.passed
+        assert any(f.code == "target_not_executed" for f in result.findings)
+
+    def test_dynamic_relevance_ignores_import_only_definition_line(self):
+        v = RelevanceValidator()
+        source = "def add(a, b):\n    return a + b\n"
+        test = (
+            "from source_module import add\n"
+            "\n"
+            "def test_basic_math():\n"
+            "    assert add is not None\n"
+        )
+        coverage = {"files": {"source_module.py": {"executed_lines": [1]}}}
+        result = v.validate_dynamic(test, source, coverage, target_function="add")
+        assert not result.passed
+        assert any(f.code == "target_not_executed" for f in result.findings)
+
+    def test_dynamic_relevance_passes_when_target_executes(self):
+        v = RelevanceValidator()
+        source = "def add(a, b):\n    return a + b\n"
+        test = (
+            "from source_module import add\n"
+            "\n"
+            "def test_basic_math():\n"
+            "    assert add(1, 2) == 3\n"
+        )
+        coverage = {"files": {"source_module.py": {"executed_lines": [1, 2]}}}
+        result = v.validate_dynamic(test, source, coverage, target_function="add")
         assert result.passed
 
     def test_snake_case_target_keywords_match(self):

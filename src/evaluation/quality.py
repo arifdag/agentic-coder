@@ -11,6 +11,8 @@ import ast
 import copy
 from typing import Any
 
+from ..verification.relevance import analyze_relevance, compute_target_coverage
+
 
 def infer_primary_target(source_code: str, metadata: dict | None = None) -> str | None:
     """Infer the function/class under test from benchmark metadata or source."""
@@ -119,85 +121,48 @@ def compute_oracle_metrics(test_code: str) -> dict[str, Any]:
     }
 
 
-def _imported_names_from_source_module(tree: ast.AST) -> set[str]:
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.ImportFrom)
-            and (node.module or "").split(".")[0] == "source_module"
-        ):
-            for alias in node.names:
-                names.add(alias.asname or alias.name)
-    return names
-
-
-def _defines_name(tree: ast.AST, target: str) -> bool:
-    target_lower = target.lower()
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == target or node.name.lower() == target_lower:
-                return True
-    return False
-
-
-def _calls_name(tree: ast.AST, target: str) -> bool:
-    target_lower = target.lower()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id.lower() == target_lower:
-                return True
-            if isinstance(func, ast.Attribute) and func.attr.lower() == target_lower:
-                return True
-    return False
-
-
 def compute_relevance_metrics(
     test_code: str,
     source_code: str,
     metadata: dict | None = None,
     passed: bool | None = None,
+    coverage_data: dict | None = None,
 ) -> dict[str, Any]:
     """Measure whether generated tests appear to target the requested code."""
     target = infer_primary_target(source_code, metadata)
-    if not target:
-        return {"eligible": False, "relevance_pass": None, "gaming_flag": False}
-    try:
-        tree = ast.parse(test_code or "")
-    except SyntaxError as exc:
-        return {
-            "eligible": True,
-            "target": target,
-            "relevance_pass": False,
-            "gaming_flag": bool(passed),
-            "error": f"syntax error: {exc.msg}",
-        }
-
-    imported = _imported_names_from_source_module(tree)
-    test_names = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    ]
-    target_lower = target.lower()
-    signals = {
-        "imports_target": target in imported or target_lower in {n.lower() for n in imported},
-        "calls_target": _calls_name(tree, target),
-        "test_name_mentions_target": any(target_lower in name.lower() for name in test_names),
-        "imports_source_module": bool(imported),
-    }
-    target_redefined = _defines_name(tree, target) and not signals["imports_target"]
-    relevance_pass = any(signals.values()) and not target_redefined
-    gaming_flag = bool(passed) and (not relevance_pass or target_redefined)
+    analysis = analyze_relevance(
+        test_code,
+        source_code=source_code,
+        target_function=target,
+    )
+    target_cov = compute_target_coverage(coverage_data, source_code, target_function=target)
+    dynamic_pass = True
+    if target_cov.get("target_line_coverage") is not None:
+        dynamic_pass = float(target_cov["target_line_coverage"]) > 0.0
+    relevance_pass = analysis.passed and dynamic_pass
+    structural_gaming_flag = (
+        not relevance_pass
+        or analysis.negative_signals.get("target_redefined", False)
+        or analysis.negative_signals.get("dummy_assertions_only", False)
+    )
+    gaming_flag = bool(passed) and structural_gaming_flag
     return {
-        "eligible": True,
+        "eligible": analysis.eligible,
         "target": target,
         "relevance_pass": relevance_pass,
         "gaming_flag": gaming_flag,
-        "target_redefined": target_redefined,
-        "target_signal_count": sum(1 for value in signals.values() if value),
-        "signals": signals,
+        "structural_gaming_flag": structural_gaming_flag,
+        "passed_for_gaming": bool(passed),
+        "static_relevance_pass": analysis.passed,
+        "static_relevance_score": analysis.score,
+        "strong_signal_count": analysis.strong_signal_count,
+        "target_redefined": analysis.negative_signals.get("target_redefined", False),
+        "target_signal_count": sum(1 for value in analysis.signals.values() if value),
+        "signals": analysis.signals,
+        "negative_signals": analysis.negative_signals,
+        "target_line_coverage": target_cov.get("target_line_coverage"),
+        "target_branch_coverage": target_cov.get("target_branch_coverage"),
+        "target_executed_line_count": target_cov.get("target_executed_line_count"),
     }
 
 
@@ -274,22 +239,12 @@ def compute_coverage_metrics(
         if isinstance(branch, (int, float)):
             out["branch_coverage"] = float(branch)
 
-    files = coverage_data.get("files") if isinstance(coverage_data, dict) else None
-    source_entry = files.get("source_module.py") if isinstance(files, dict) else None
-    if isinstance(source_entry, dict):
-        summary = source_entry.get("summary")
-        if isinstance(summary, dict):
-            if isinstance(summary.get("percent_covered"), (int, float)):
-                out["target_line_coverage"] = float(summary["percent_covered"])
-            branch = summary.get("percent_covered_branches") or summary.get("percent_branches")
-            if isinstance(branch, (int, float)):
-                out["target_branch_coverage"] = float(branch)
-
-    if "target_line_coverage" not in out and out.get("line_coverage") is not None:
-        out["target_line_coverage"] = out["line_coverage"]
-    if "target_branch_coverage" not in out and out.get("branch_coverage") is not None:
-        out["target_branch_coverage"] = out["branch_coverage"]
-    out["target"] = infer_primary_target(source_code, metadata)
+    target = infer_primary_target(source_code, metadata)
+    target_cov = compute_target_coverage(coverage_data, source_code, target_function=target)
+    for key, value in target_cov.items():
+        if value is not None:
+            out[key] = value
+    out["target"] = target
     out["source_line_count"] = _source_line_count(source_code)
     return out
 
