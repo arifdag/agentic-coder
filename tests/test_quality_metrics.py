@@ -88,6 +88,23 @@ def test_target_coverage_does_not_count_helper_lines():
     assert metrics["target_executed_line_count"] == 0
 
 
+def test_target_coverage_matches_repo_source_file_path():
+    source = "def add(a, b):\n    return a + b\n"
+    coverage = {
+        "totals": {"percent_covered": 100.0},
+        "files": {"mypkg/core.py": {"executed_lines": [1, 2]}},
+    }
+
+    metrics = compute_coverage_metrics(
+        coverage,
+        source,
+        {"func_name": "add", "target_file": "mypkg/core.py"},
+    )
+
+    assert metrics["target_line_coverage"] == 100.0
+    assert metrics["target_executed_line_count"] == 1
+
+
 def test_gate_quality_metrics_extract_safety_and_dependency_outcomes():
     gates = [
         {"gate_name": "sast", "passed": False},

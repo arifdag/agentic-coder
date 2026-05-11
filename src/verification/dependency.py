@@ -3,37 +3,108 @@
 import ast
 import re
 import sys
-from typing import List, Set, Optional
+from typing import List, Optional, Set
 
 import httpx
 
-from .models import GateResult, Finding, Severity
+from .models import Finding, GateResult, Severity
 
 KNOWN_TEST_PACKAGES = {
-    "pytest", "pytest_cov", "coverage", "unittest", "mock",
-    "pytest_timeout", "pytest_mock", "hypothesis", "faker",
+    "pytest",
+    "_pytest",
+    "pytest_cov",
+    "coverage",
+    "unittest",
+    "mock",
+    "pytest_timeout",
+    "pytest_mock",
+    "hypothesis",
+    "faker",
 }
 
 KNOWN_JS_TEST_PACKAGES = {
-    "jest", "mocha", "chai", "sinon", "supertest", "ava",
-    "jasmine", "tap", "tape", "vitest", "cypress",
-    "@jest/globals", "@testing-library/jest-dom",
-    "@testing-library/react", "@testing-library/dom",
+    "jest",
+    "mocha",
+    "chai",
+    "sinon",
+    "supertest",
+    "ava",
+    "jasmine",
+    "tap",
+    "tape",
+    "vitest",
+    "cypress",
+    "@jest/globals",
+    "@testing-library/jest-dom",
+    "@testing-library/react",
+    "@testing-library/dom",
 }
 
 NODE_BUILTINS = {
-    "assert", "async_hooks", "buffer", "child_process", "cluster",
-    "console", "constants", "crypto", "dgram", "diagnostics_channel",
-    "dns", "domain", "events", "fs", "http", "http2", "https",
-    "inspector", "module", "net", "os", "path", "perf_hooks",
-    "process", "punycode", "querystring", "readline", "repl",
-    "stream", "string_decoder", "sys", "timers", "tls", "trace_events",
-    "tty", "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib",
-    "node:assert", "node:buffer", "node:child_process", "node:crypto",
-    "node:events", "node:fs", "node:http", "node:https", "node:net",
-    "node:os", "node:path", "node:process", "node:querystring",
-    "node:readline", "node:stream", "node:timers", "node:tls",
-    "node:url", "node:util", "node:vm", "node:worker_threads", "node:zlib",
+    "assert",
+    "async_hooks",
+    "buffer",
+    "child_process",
+    "cluster",
+    "console",
+    "constants",
+    "crypto",
+    "dgram",
+    "diagnostics_channel",
+    "dns",
+    "domain",
+    "events",
+    "fs",
+    "http",
+    "http2",
+    "https",
+    "inspector",
+    "module",
+    "net",
+    "os",
+    "path",
+    "perf_hooks",
+    "process",
+    "punycode",
+    "querystring",
+    "readline",
+    "repl",
+    "stream",
+    "string_decoder",
+    "sys",
+    "timers",
+    "tls",
+    "trace_events",
+    "tty",
+    "url",
+    "util",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
+    "zlib",
+    "node:assert",
+    "node:buffer",
+    "node:child_process",
+    "node:crypto",
+    "node:events",
+    "node:fs",
+    "node:http",
+    "node:https",
+    "node:net",
+    "node:os",
+    "node:path",
+    "node:process",
+    "node:querystring",
+    "node:readline",
+    "node:stream",
+    "node:timers",
+    "node:tls",
+    "node:url",
+    "node:util",
+    "node:vm",
+    "node:worker_threads",
+    "node:zlib",
 }
 
 IMPORT_TO_PYPI = {
@@ -52,47 +123,249 @@ IMPORT_TO_PYPI = {
 }
 
 
+# Known installed package top-level names whose submodules must not be
+# flagged as PHANTOM-PKG when they appear as flattened import names.
+# This prevents false positives for packages like SymPy where internal
+# modules such as sympy.printing.codeprinter are legitimate.
+KNOWN_INSTALLED_PREFIXES = {
+    "sympy",
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "sklearn",
+    "cv2",
+    "PIL",
+    "crypto",
+    "cython",
+}
+
+KNOWN_INTERNAL_MODULE_ROOTS = {
+    # SymPy internals can appear as top-level imports after benchmark
+    # flattening even though they are not standalone PyPI packages.
+    "codeprinter",
+    "precedence",
+}
+
+
+def _resolve_pypi_name(import_name: str) -> str:
+    """Map an import name to its PyPI distribution name."""
+    return IMPORT_TO_PYPI.get(import_name, import_name)
+
+
+def _is_known_installed_submodule(import_name: str) -> bool:
+    """Check whether import_name is a known submodule of an installed package.
+
+    Handles cases where AST flattening produces top-level names from
+    qualified imports like ``from sympy.printing.codeprinter import ...``.
+    """
+    for prefix in KNOWN_INSTALLED_PREFIXES:
+        if import_name == prefix or import_name.startswith(prefix + "."):
+            return True
+    return False
+
+
 def _get_stdlib_modules() -> Set[str]:
     """Get the set of standard library module names."""
     if hasattr(sys, "stdlib_module_names"):
         return set(sys.stdlib_module_names)
     return {
-        "abc", "aifc", "argparse", "array", "ast", "asyncio", "atexit",
-        "base64", "binascii", "bisect", "builtins", "bz2", "calendar",
-        "cgi", "cgitb", "chunk", "cmath", "cmd", "code", "codecs",
-        "collections", "colorsys", "compileall", "concurrent",
-        "configparser", "contextlib", "contextvars", "copy", "copyreg",
-        "cProfile", "csv", "ctypes", "curses", "dataclasses", "datetime",
-        "dbm", "decimal", "difflib", "dis", "distutils", "doctest",
-        "email", "encodings", "enum", "errno", "faulthandler", "fcntl",
-        "filecmp", "fileinput", "fnmatch", "fractions", "ftplib",
-        "functools", "gc", "getopt", "getpass", "gettext", "glob",
-        "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http",
-        "idlelib", "imaplib", "imghdr", "imp", "importlib", "inspect",
-        "io", "ipaddress", "itertools", "json", "keyword", "lib2to3",
-        "linecache", "locale", "logging", "lzma", "mailbox", "mailcap",
-        "marshal", "math", "mimetypes", "mmap", "modulefinder",
-        "multiprocessing", "netrc", "nis", "nntplib", "numbers",
-        "operator", "optparse", "os", "ossaudiodev", "pathlib",
-        "pdb", "pickle", "pickletools", "pipes", "pkgutil", "platform",
-        "plistlib", "poplib", "posix", "posixpath", "pprint",
-        "profile", "pstats", "pty", "pwd", "py_compile",
-        "pyclbr", "pydoc", "queue", "quopri", "random", "re",
-        "readline", "reprlib", "resource", "rlcompleter", "runpy",
-        "sched", "secrets", "select", "selectors", "shelve",
-        "shlex", "shutil", "signal", "site", "smtpd", "smtplib",
-        "sndhdr", "socket", "socketserver", "sqlite3", "ssl",
-        "stat", "statistics", "string", "stringprep", "struct",
-        "subprocess", "sunau", "symtable", "sys", "sysconfig",
-        "syslog", "tabnanny", "tarfile", "telnetlib", "tempfile",
-        "termios", "test", "textwrap", "threading", "time",
-        "timeit", "tkinter", "token", "tokenize", "tomllib", "trace",
-        "traceback", "tracemalloc", "tty", "turtle", "turtledemo",
-        "types", "typing", "unicodedata", "unittest", "urllib",
-        "uu", "uuid", "venv", "warnings", "wave", "weakref",
-        "webbrowser", "winreg", "winsound", "wsgiref", "xdrlib",
-        "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib",
-        "_thread", "__future__",
+        "abc",
+        "aifc",
+        "argparse",
+        "array",
+        "ast",
+        "asyncio",
+        "atexit",
+        "base64",
+        "binascii",
+        "bisect",
+        "builtins",
+        "bz2",
+        "calendar",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "cmath",
+        "cmd",
+        "code",
+        "codecs",
+        "collections",
+        "colorsys",
+        "compileall",
+        "concurrent",
+        "configparser",
+        "contextlib",
+        "contextvars",
+        "copy",
+        "copyreg",
+        "cProfile",
+        "csv",
+        "ctypes",
+        "curses",
+        "dataclasses",
+        "datetime",
+        "dbm",
+        "decimal",
+        "difflib",
+        "dis",
+        "distutils",
+        "doctest",
+        "email",
+        "encodings",
+        "enum",
+        "errno",
+        "faulthandler",
+        "fcntl",
+        "filecmp",
+        "fileinput",
+        "fnmatch",
+        "fractions",
+        "ftplib",
+        "functools",
+        "gc",
+        "getopt",
+        "getpass",
+        "gettext",
+        "glob",
+        "grp",
+        "gzip",
+        "hashlib",
+        "heapq",
+        "hmac",
+        "html",
+        "http",
+        "idlelib",
+        "imaplib",
+        "imghdr",
+        "imp",
+        "importlib",
+        "inspect",
+        "io",
+        "ipaddress",
+        "itertools",
+        "json",
+        "keyword",
+        "lib2to3",
+        "linecache",
+        "locale",
+        "logging",
+        "lzma",
+        "mailbox",
+        "mailcap",
+        "marshal",
+        "math",
+        "mimetypes",
+        "mmap",
+        "modulefinder",
+        "multiprocessing",
+        "netrc",
+        "nis",
+        "nntplib",
+        "numbers",
+        "operator",
+        "optparse",
+        "os",
+        "ossaudiodev",
+        "pathlib",
+        "pdb",
+        "pickle",
+        "pickletools",
+        "pipes",
+        "pkgutil",
+        "platform",
+        "plistlib",
+        "poplib",
+        "posix",
+        "posixpath",
+        "pprint",
+        "profile",
+        "pstats",
+        "pty",
+        "pwd",
+        "py_compile",
+        "pyclbr",
+        "pydoc",
+        "queue",
+        "quopri",
+        "random",
+        "re",
+        "readline",
+        "reprlib",
+        "resource",
+        "rlcompleter",
+        "runpy",
+        "sched",
+        "secrets",
+        "select",
+        "selectors",
+        "shelve",
+        "shlex",
+        "shutil",
+        "signal",
+        "site",
+        "smtpd",
+        "smtplib",
+        "sndhdr",
+        "socket",
+        "socketserver",
+        "sqlite3",
+        "ssl",
+        "stat",
+        "statistics",
+        "string",
+        "stringprep",
+        "struct",
+        "subprocess",
+        "sunau",
+        "symtable",
+        "sys",
+        "sysconfig",
+        "syslog",
+        "tabnanny",
+        "tarfile",
+        "telnetlib",
+        "tempfile",
+        "termios",
+        "test",
+        "textwrap",
+        "threading",
+        "time",
+        "timeit",
+        "tkinter",
+        "token",
+        "tokenize",
+        "tomllib",
+        "trace",
+        "traceback",
+        "tracemalloc",
+        "tty",
+        "turtle",
+        "turtledemo",
+        "types",
+        "typing",
+        "unicodedata",
+        "unittest",
+        "urllib",
+        "uu",
+        "uuid",
+        "venv",
+        "warnings",
+        "wave",
+        "weakref",
+        "webbrowser",
+        "winreg",
+        "winsound",
+        "wsgiref",
+        "xdrlib",
+        "xml",
+        "xmlrpc",
+        "zipapp",
+        "zipfile",
+        "zipimport",
+        "zlib",
+        "_thread",
+        "__future__",
     }
 
 
@@ -138,13 +411,17 @@ def extract_js_imports(code: str) -> Set[str]:
     for m in re.finditer(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""", code):
         pkg = m.group(1)
         if not pkg.startswith("."):
-            packages.add(pkg.split("/")[0] if not pkg.startswith("@") else "/".join(pkg.split("/")[:2]))
+            packages.add(
+                pkg.split("/")[0] if not pkg.startswith("@") else "/".join(pkg.split("/")[:2])
+            )
 
     # import ... from 'pkg'
     for m in re.finditer(r"""(?:from|import\s+.*?\s+from)\s+['"]([^'"]+)['"]""", code):
         pkg = m.group(1)
         if not pkg.startswith("."):
-            packages.add(pkg.split("/")[0] if not pkg.startswith("@") else "/".join(pkg.split("/")[:2]))
+            packages.add(
+                pkg.split("/")[0] if not pkg.startswith("@") else "/".join(pkg.split("/")[:2])
+            )
 
     return packages
 
@@ -169,6 +446,10 @@ class DependencyValidator:
         if package in self.extra_known:
             return True
         if package == "source_module":
+            return True
+        if package in KNOWN_INTERNAL_MODULE_ROOTS:
+            return True
+        if _is_known_installed_submodule(package):
             return True
         return False
 
@@ -232,22 +513,25 @@ class DependencyValidator:
         findings: List[Finding] = []
 
         third_party = {
-            pkg for pkg in imports
-            if not self._is_known_safe(pkg)
+            pkg
+            for pkg in imports
+            if not self._is_known_safe(pkg) and not _is_known_installed_submodule(pkg)
         }
 
         for pkg in sorted(third_party):
             exists = self._check_pypi(pkg)
             if not exists:
-                findings.append(Finding(
-                    severity=Severity.ERROR,
-                    code="PHANTOM-PKG",
-                    message=(
-                        f"Package '{pkg}' not found on PyPI. "
-                        f"This may be a hallucinated dependency."
-                    ),
-                    suggestion=f"Remove or replace the import of '{pkg}'.",
-                ))
+                findings.append(
+                    Finding(
+                        severity=Severity.ERROR,
+                        code="PHANTOM-PKG",
+                        message=(
+                            f"Package '{pkg}' not found on PyPI. "
+                            f"This may be a hallucinated dependency."
+                        ),
+                        suggestion=f"Remove or replace the import of '{pkg}'.",
+                    )
+                )
 
         passed = not any(f.severity == Severity.ERROR for f in findings)
 
@@ -261,23 +545,22 @@ class DependencyValidator:
         imports = extract_js_imports(code)
         findings: List[Finding] = []
 
-        third_party = {
-            pkg for pkg in imports
-            if not self._is_known_safe_js(pkg)
-        }
+        third_party = {pkg for pkg in imports if not self._is_known_safe_js(pkg)}
 
         for pkg in sorted(third_party):
             exists = self._check_npm(pkg)
             if not exists:
-                findings.append(Finding(
-                    severity=Severity.ERROR,
-                    code="PHANTOM-PKG",
-                    message=(
-                        f"Package '{pkg}' not found on npm. "
-                        f"This may be a hallucinated dependency."
-                    ),
-                    suggestion=f"Remove or replace the import of '{pkg}'.",
-                ))
+                findings.append(
+                    Finding(
+                        severity=Severity.ERROR,
+                        code="PHANTOM-PKG",
+                        message=(
+                            f"Package '{pkg}' not found on npm. "
+                            f"This may be a hallucinated dependency."
+                        ),
+                        suggestion=f"Remove or replace the import of '{pkg}'.",
+                    )
+                )
 
         passed = not any(f.severity == Severity.ERROR for f in findings)
 

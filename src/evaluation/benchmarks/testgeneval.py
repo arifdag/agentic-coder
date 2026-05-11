@@ -90,6 +90,12 @@ class TestGenEvalDataset:
             metadata = {k: row_dict[k] for k in _METADATA_KEYS if k in row_dict}
             metadata["dataset_id"] = self._dataset_id
             metadata["split"] = self._split
+            metadata["execution_context"] = "repo"
+            # Ensure repo execution metadata is present even when fields are empty/null
+            metadata.setdefault("repo", row_dict.get("repo"))
+            metadata["code_file"] = metadata.get("code_file") or row_dict.get("code_file")
+            metadata["test_file"] = metadata.get("test_file") or row_dict.get("test_file")
+            metadata["base_commit"] = metadata.get("base_commit") or row_dict.get("base_commit")
 
             # Build a stable case id.
             instance_id = metadata.get("instance_id")

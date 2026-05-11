@@ -49,8 +49,12 @@ Guidelines:
    - Tests must execute branches and logic of the code under test, not merely import it.
 
 2. Target relevance (critical):
-   - Import the real public target(s) from the module under test. In benchmark/sandbox
-     runs, that module is named source_module, e.g. from source_module import target.
+   - Import the real public target(s) from the module under test.
+   - In single-file sandbox runs, use source_module as the import name,
+     e.g. from source_module import target.
+   - In repo-context runs, use the real module/package path named in the prompt
+     or request, e.g. from mypackage.mymodule import target. Do NOT use source_module
+     when the prompt specifies a real import path.
    - Call or instantiate the target in your test assertions to exercise its body.
    - Do NOT redefine, shadow, or re-implement functions/classes from the source module
      inside the test file. Always import and delegate to the original implementation.
@@ -85,8 +89,13 @@ GENERATION_TEMPLATE = """Generate pytest unit tests for the following Python cod
 {context_section}
 
 Requirements:
-- Import the real public target(s) from the source module. In benchmark/sandbox runs,
-  use source_module, e.g. from source_module import target. Do NOT redefine targets locally.
+- Import the real public target(s) from the source module:
+  - In single-file sandbox/benchmark runs, use source_module as the import name,
+    e.g. from source_module import target.
+  - In repo-context runs where the prompt specifies a real module/package path,
+    use that exact path, e.g. from mypackage.mymodule import target.
+    Do NOT use source_module in repo-context; import the real module path instead.
+- Do NOT redefine targets locally; always import and delegate to the original.
 - Call or instantiate the target in assertions to exercise its logic and branches.
 - Every test must have meaningful assertions; never assert True, assert 1 == 1, or pass-only bodies.
 - Cover edge cases: empty inputs, None values, boundary values, and error paths.
@@ -112,21 +121,37 @@ Error encountered:
 {coverage_section}
 
 Repair rules (apply all that match the diagnostics above):
-- relevance / tests_unrelated_to_source / target_not_relevant: The test does not reference the target from the source module.
-  Replace irrelevant tests with ones that import and call/instantiate the original target.
-- target_relevance / target_not_executed: The target body was never executed under coverage.
-  Tests must call or instantiate the target, not merely import it. Add assertions that
-  exercise the target's branches and return values.
-- target_shadowed_in_tests: A function/class in the test file shadows the source module target.
-  Remove the local redefinition and import the real target from the source module instead.
-- no_assertions: Tests have no assertions at all. Add meaningful assertions that check
-  return values, state changes, or expected exceptions.
-- dummy_assertions_only: Tests contain only vacuous assertions (assert True, assert 1 == 1, etc.).
-  Replace every dummy assertion with a real assertion that verifies target behavior.
+- relevance / tests_unrelated_to_source / target_not_relevant: The test does not
+  reference the target from the source module. Replace irrelevant tests with ones
+  that import and call/instantiate the original target.
+- target_relevance / target_not_executed: The target body was never executed under
+  coverage. Tests must call or instantiate the target, not merely import it.
+  Add assertions that exercise the target branches and return values.
+- target_shadowed_in_tests: A function/class in the test file shadows the source
+  module target. Remove the local redefinition and import the real target instead.
+- no_assertions: Tests have no assertions at all. Add meaningful assertions that
+  check return values, state changes, or expected exceptions.
+- dummy_assertions_only: Tests contain only vacuous assertions (assert True,
+  assert 1 == 1, etc.). Replace every dummy assertion with a real assertion that
+  verifies target behavior.
+- PHANTOM-PKG / dependency failure: An import refers to a package not found on PyPI.
+  Do NOT invent packages or add fictitious dependencies. Keep imports to the real
+  target module and fix only the test code import paths and assertions. If a
+  legitimate dependency is missing, note it but do not mock or stub it away.
+- infrastructure / import error / ModuleNotFoundError: The test cannot find the
+  target module. Check the import path: in single-file sandbox mode use
+  source_module; in repo-context use the real module/package path from the prompt.
+  Fix only the import path and test code, not the production source.
 - coverage gaps: Add tests that call the target on inputs reaching the uncovered lines.
 
-Always import the real target from the source module; in benchmark/sandbox runs, use source_module.
-Never re-implement it locally.
+Target relevance and coverage rules (critical):
+- Every test MUST import the real target and call/instantiate it in an assertion.
+- In single-file sandbox mode: import from source_module.
+- In repo-context mode: import from the real module path specified in the prompt.
+- Do NOT write tests that only check importability; they must exercise target logic.
+- Do NOT replace meaningful assertions with dummy assertions during repair.
+- Never re-implement the source module target locally in the test file.
+
 Return ONLY the corrected Python test code without any explanations or markdown."""
 
 

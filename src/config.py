@@ -367,6 +367,14 @@ class EvalConfig(BaseModel):
     mutation_max_mutants: int = Field(default=25)
     reliability_repeats: int = Field(default=0)
 
+    execution_context: str = Field(default="auto")
+    repo_setup: str = Field(default="auto")
+    gate_policy: str = Field(default="strict")
+
+    _EXECUTION_CONTEXTS: ClassVar[tuple[str, ...]] = ("auto", "single-file", "repo")
+    _REPO_SETUPS: ClassVar[tuple[str, ...]] = ("auto", "prepare", "reuse", "off")
+    _GATE_POLICIES: ClassVar[tuple[str, ...]] = ("strict", "balanced")
+
     _QUALITY_MODES: ClassVar[tuple[str, ...]] = ("off", "fast", "full")
 
     @classmethod
@@ -378,6 +386,12 @@ class EvalConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         self.quality_mode = self._normalize_quality_mode(self.quality_mode)
+        ec = str(self.execution_context or "auto").lower()
+        self.execution_context = ec if ec in self._EXECUTION_CONTEXTS else "auto"
+        rs = str(self.repo_setup or "auto").lower()
+        self.repo_setup = rs if rs in self._REPO_SETUPS else "auto"
+        gp = str(self.gate_policy or "strict").lower()
+        self.gate_policy = gp if gp in self._GATE_POLICIES else "strict"
         if self.mutation_max_mutants < 0:
             self.mutation_max_mutants = 0
         if self.reliability_repeats < 0:
@@ -394,6 +408,9 @@ class EvalConfig(BaseModel):
             quality_mode=os.getenv("EVAL_QUALITY_MODE", "fast"),
             mutation_max_mutants=int(os.getenv("EVAL_MUTATION_MAX_MUTANTS", "25")),
             reliability_repeats=int(os.getenv("EVAL_RELIABILITY_REPEATS", "0")),
+            execution_context=os.getenv("EVAL_EXECUTION_CONTEXT", "auto"),
+            repo_setup=os.getenv("EVAL_REPO_SETUP", "auto"),
+            gate_policy=os.getenv("EVAL_GATE_POLICY", "strict"),
         )
 
 

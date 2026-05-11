@@ -96,6 +96,46 @@ class TestEvalMetrics:
         assert m.avg_time == 2.0
         assert m.gate_pass_rates["sast"] == 0.5
 
+    def test_from_results_aggregates_execution_metrics(self):
+        results = [
+            EvalResult(
+                case_id="repo-pass",
+                execution_metrics={
+                    "execution_context": "repo",
+                    "eligible": True,
+                    "infrastructure_pass": True,
+                    "repo_setup_pass": True,
+                },
+            ),
+            EvalResult(
+                case_id="repo-fail",
+                execution_metrics={
+                    "execution_context": "repo",
+                    "eligible": True,
+                    "infrastructure_pass": False,
+                    "repo_setup_pass": False,
+                },
+            ),
+            EvalResult(
+                case_id="single",
+                execution_metrics={
+                    "execution_context": "single-file",
+                    "eligible": False,
+                },
+            ),
+        ]
+
+        m = EvalMetrics.from_results(results, dataset_name="exec")
+
+        assert m.infrastructure_eligible_total == 2
+        assert m.infrastructure_total == 2
+        assert m.infrastructure_passed == 1
+        assert m.infrastructure_pass_rate == pytest.approx(0.5)
+        assert m.repo_setup_passed == 1
+        assert m.repo_setup_pass_rate == pytest.approx(0.5)
+        assert m.execution_context_counts["repo"] == 2
+        assert m.execution_context_counts["single-file"] == 1
+
     def test_from_results_research_quality_metrics(self):
         results = [
             EvalResult(

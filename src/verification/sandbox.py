@@ -95,6 +95,12 @@ class ExecutionResult(BaseModel):
     )
     branch_coverage: Optional[float] = Field(default=None, description="Branch coverage percentage")
     coverage_data: Optional[dict] = Field(default=None, description="Parsed coverage.json data")
+    repo_setup_pass: Optional[bool] = Field(
+        default=None, description="Whether repo-context dependency setup succeeded"
+    )
+    infrastructure_pass: Optional[bool] = Field(
+        default=None, description="Whether repo-context infrastructure was usable"
+    )
 
 
 class SandboxExecutor:

@@ -1,17 +1,19 @@
 """Verification gates for the LLM platform."""
 
-from .sandbox import SandboxExecutor, ExecutionResult
-from .ui_sandbox import UITestExecutor
-from .js_sandbox import JsSandboxExecutor
-from .sast import SastAnalyzer
-from .dependency import DependencyValidator
-from .judge import SastJudge
-from .explanation_judge import ExplanationJudge
 from .complexity import ComplexityValidator
+from .dependency import DependencyValidator
+from .explanation_judge import ExplanationJudge
+from .js_sandbox import JsSandboxExecutor
+from .judge import SastJudge
+from .models import Finding, GateResult, JudgeVerdict, Severity, VerificationReport
 from .relevance import RelevanceValidator
-from .models import GateResult, Finding, VerificationReport, Severity, JudgeVerdict
+from .repo_context import RepoContextExecutor
+from .sandbox import ExecutionResult, SandboxExecutor
+from .sast import SastAnalyzer
+from .ui_sandbox import UITestExecutor
 
 __all__ = [
+    "RepoContextExecutor",
     "SandboxExecutor",
     "ExecutionResult",
     "UITestExecutor",

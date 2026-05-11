@@ -28,6 +28,7 @@ from ..verification.js_sandbox import JsSandboxExecutor
 from ..verification.judge import SastJudge
 from ..verification.models import Finding, GateResult, Severity, VerificationReport
 from ..verification.relevance import RelevanceValidator
+from ..verification.repo_context import RepoContextExecutor
 from ..verification.sandbox import SandboxExecutor
 from ..verification.sast import SastAnalyzer
 from ..verification.ui_sandbox import UITestExecutor
@@ -82,6 +83,10 @@ class PipelineState(TypedDict):
     sandbox_tests_passed: Optional[int]
     sandbox_branch_coverage: Optional[float]
     sandbox_coverage_data: Optional[dict]
+    repo_metadata: Optional[dict]
+    execution_context: Optional[str]
+    infrastructure_pass: Optional[bool]
+    repo_setup_pass: Optional[bool]
 
     # Legacy single-gate fields kept for CLI compatibility
     verification_result: Optional[dict]
@@ -155,6 +160,7 @@ def create_pipeline(config: Optional[Config] = None):
         RelevanceValidator(
             source_module=config.relevance.source_module,
             min_relevance_signals=config.relevance.min_signals,
+            gate_policy=config.evaluation.gate_policy,
         )
         if config.relevance.enabled
         else None
@@ -410,6 +416,7 @@ def create_pipeline(config: Optional[Config] = None):
 
         test_code = state["generated_tests"] or ""
         lang = state.get("language", Language.PYTHON.value)
+        execution_context = "single-file"
 
         if task_type == TaskType.UI_TEST.value:
             result = ui_sandbox.execute(
@@ -425,10 +432,26 @@ def create_pipeline(config: Optional[Config] = None):
             )
         else:
             source_code = state["code_input"]
-            result = sandbox.execute(
-                source_code=source_code,
-                test_code=test_code,
-            )
+            repo_meta = state.get("repo_metadata") or {}
+            has_repo_fields = bool(repo_meta.get("project_root") or repo_meta.get("repo"))
+            ec = config.evaluation.execution_context if config else "auto"
+            use_repo = (ec == "repo") or (ec == "auto" and has_repo_fields)
+            if use_repo and has_repo_fields:
+                execution_context = "repo"
+                executor = RepoContextExecutor(
+                    repo_setup=config.evaluation.repo_setup,
+                    gate_policy=config.evaluation.gate_policy,
+                )
+                result = executor.execute(
+                    source_code=source_code,
+                    test_code=test_code,
+                    metadata=repo_meta,
+                )
+            else:
+                result = sandbox.execute(
+                    source_code=source_code,
+                    test_code=test_code,
+                )
 
         sandbox_gate = GateResult(
             gate_name="sandbox",
@@ -446,21 +469,31 @@ def create_pipeline(config: Optional[Config] = None):
                     source_code=state["code_input"],
                     coverage_data=getattr(result, "coverage_data", None),
                     target_function=state.get("target_function"),
+                    source_file_path=(
+                        (state.get("repo_metadata") or {}).get("target_file")
+                        or (state.get("repo_metadata") or {}).get("code_file")
+                    ),
                 )
                 all_gates.append(target_gate.model_dump())
+
+        infra_pass = getattr(result, "infrastructure_pass", None)
+        setup_pass = getattr(result, "repo_setup_pass", None)
+        if infra_pass is None:
+            infra_pass = result.error_type != "infrastructure_error"
+        if setup_pass is None:
+            setup_pass = False if result.error_type == "infrastructure_error" else None
 
         return {
             **state,
             "gate_results": all_gates,
             "coverage_report": result.coverage_gaps,
-            # Propagate the actual pytest pass/fail counts so downstream
-            # consumers (eval runner, paper metrics) can report partial
-            # success rather than collapsing everything to a single
-            # all-or-nothing pass flag.
             "sandbox_tests_run": getattr(result, "tests_run", 0),
             "sandbox_tests_passed": getattr(result, "tests_passed", 0),
             "sandbox_branch_coverage": getattr(result, "branch_coverage", None),
             "sandbox_coverage_data": getattr(result, "coverage_data", None),
+            "execution_context": execution_context,
+            "infrastructure_pass": infra_pass,
+            "repo_setup_pass": setup_pass,
             "status": "sandbox_checked",
         }
 
@@ -666,6 +699,8 @@ def create_pipeline(config: Optional[Config] = None):
     def should_repair(state: PipelineState) -> Literal["repair", "output"]:
         if state["verification_passed"]:
             return "output"
+        if state.get("error_type") == "infrastructure_error":
+            return "output"
         if state["retry_count"] >= state["max_retries"]:
             return "output"
         return "repair"
@@ -793,6 +828,7 @@ def run_pipeline(
     html_content: Optional[str] = None,
     description: Optional[str] = None,
     target_function: Optional[str] = None,
+    repo_metadata: Optional[dict] = None,
 ) -> PipelineState:
     """Run the pipeline on input code.
 
@@ -824,6 +860,10 @@ def run_pipeline(
         "sandbox_tests_passed": None,
         "sandbox_branch_coverage": None,
         "sandbox_coverage_data": None,
+        "repo_metadata": repo_metadata,
+        "execution_context": None,
+        "infrastructure_pass": None,
+        "repo_setup_pass": None,
         "retry_count": 0,
         "max_retries": max_retries,
         "error_type": None,

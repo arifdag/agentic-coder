@@ -41,6 +41,7 @@ class EvalResult(BaseModel):
     safety_metrics: Dict[str, Any] = Field(default_factory=dict)
     dependency_metrics: Dict[str, Any] = Field(default_factory=dict)
     bug_metrics: Dict[str, Any] = Field(default_factory=dict)
+    execution_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
 _RATE_LIMIT_HINTS = (
@@ -121,6 +122,14 @@ class EvalMetrics(BaseModel):
     assertion_presence_rate: Optional[float] = None
     avg_assertions_per_test: Optional[float] = None
     avg_coverage_gain: Optional[float] = None
+    # Repo-context infrastructure metrics
+    infrastructure_total: int = 0
+    infrastructure_passed: int = 0
+    infrastructure_pass_rate: Optional[float] = None
+    infrastructure_eligible_total: int = 0
+    repo_setup_passed: int = 0
+    repo_setup_pass_rate: Optional[float] = None
+    execution_context_counts: Dict[str, int] = Field(default_factory=dict)
 
     @classmethod
     def from_results(cls, results: List[EvalResult], dataset_name: str = "") -> "EvalMetrics":
@@ -287,6 +296,23 @@ class EvalMetrics(BaseModel):
         ]
         avg_coverage_gain = _mean(coverage_gains)
 
+        execution_context_counts: Dict[str, int] = {}
+        infra_eligible = [r for r in results if bool(r.execution_metrics.get("eligible"))]
+        for r in results:
+            context = str(r.execution_metrics.get("execution_context") or "unknown")
+            execution_context_counts[context] = execution_context_counts.get(context, 0) + 1
+
+        infrastructure_total = len(infra_eligible)
+        infrastructure_passed = sum(
+            1 for r in infra_eligible if bool(r.execution_metrics.get("infrastructure_pass"))
+        )
+        setup_eligible = [
+            r for r in infra_eligible if r.execution_metrics.get("repo_setup_pass") is not None
+        ]
+        repo_setup_passed = sum(
+            1 for r in setup_eligible if bool(r.execution_metrics.get("repo_setup_pass"))
+        )
+
         return cls(
             dataset_name=dataset_name,
             total=total,
@@ -322,6 +348,13 @@ class EvalMetrics(BaseModel):
             assertion_presence_rate=assertion_presence_rate,
             avg_assertions_per_test=avg_assertions_per_test,
             avg_coverage_gain=avg_coverage_gain,
+            infrastructure_total=infrastructure_total,
+            infrastructure_passed=infrastructure_passed,
+            infrastructure_pass_rate=_rate(infrastructure_passed, infrastructure_total),
+            infrastructure_eligible_total=infrastructure_total,
+            repo_setup_passed=repo_setup_passed,
+            repo_setup_pass_rate=_rate(repo_setup_passed, len(setup_eligible)),
+            execution_context_counts=execution_context_counts,
         )
 
     def to_markdown(self) -> str:
@@ -372,6 +405,12 @@ class EvalMetrics(BaseModel):
             lines.append(f"| Avg assertions/test | {self.avg_assertions_per_test:.2f} |")
         if self.avg_coverage_gain is not None:
             lines.append(f"| Avg coverage gain | {self.avg_coverage_gain:+.2f} |")
+        if self.infrastructure_eligible_total:
+            lines.append(f"| Infra eligible | {self.infrastructure_eligible_total} |")
+        if self.infrastructure_pass_rate is not None:
+            lines.append(f"| Infra pass rate | {self.infrastructure_pass_rate:.1%} |")
+        if self.repo_setup_pass_rate is not None:
+            lines.append(f"| Repo setup pass rate | {self.repo_setup_pass_rate:.1%} |")
         lines.append(f"| Avg iterations | {self.avg_iterations:.2f} |")
         lines.append(f"| Avg time (s) | {self.avg_time:.2f} |")
 

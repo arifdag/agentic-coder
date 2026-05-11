@@ -159,6 +159,7 @@ class ProjectTestDataset:
 
         # Kahn's algorithm with alphabetical tie-break on (rel path).
         from collections import defaultdict, deque
+
         in_degree = defaultdict(int)
         rev = defaultdict(set)
         for a, bs in deps.items():
@@ -167,9 +168,10 @@ class ProjectTestDataset:
                 in_degree[a] += 1
 
         # Seed with all nodes having no dependencies, sorted alphabetically.
-        order_key = lambda i: files[i][0]  # relative path
-        ready = sorted([i for i in range(len(files)) if in_degree[i] == 0],
-                       key=order_key)
+        def order_key(i):
+            return files[i][0]  # relative path
+
+        ready = sorted([i for i in range(len(files)) if in_degree[i] == 0], key=order_key)
         ready = deque(ready)
         out_idx: list = []
         seen: Set[int] = set()
@@ -250,13 +252,14 @@ class ProjectTestDataset:
         except SyntaxError:
             # Give up on AST; fall back to a regex-only best effort so the
             # case still loads (even if tests will likely fail on that file).
-            body = re.sub(r"^\s*from\s+__future__\s+import\s+[^\n]*\n",
-                          "", text, flags=re.M)
+            body = re.sub(r"^\s*from\s+__future__\s+import\s+[^\n]*\n", "", text, flags=re.M)
             for root in intra_roots:
                 body = re.sub(
                     rf"^\s*(?:from\s+{re.escape(root)}(?:\.[\w\.]+)?\s+import[^\n]*"
                     rf"|import\s+{re.escape(root)}(?:\.[\w\.]+)?[^\n]*)\n",
-                    "", body, flags=re.M,
+                    "",
+                    body,
+                    flags=re.M,
                 )
             return future_features, body, namespace_names
 
@@ -300,11 +303,13 @@ class ProjectTestDataset:
                         # `from pkg.mod import Foo as Bar` -> Bar = Foo
                         replacement_lines.append(f"{asname} = {name}")
                     # else: plain `from pkg.mod import Foo` -> drop.
-                rewrites.append((
-                    node.lineno,
-                    node.end_lineno or node.lineno,
-                    "\n".join(replacement_lines),
-                ))
+                rewrites.append(
+                    (
+                        node.lineno,
+                        node.end_lineno or node.lineno,
+                        "\n".join(replacement_lines),
+                    )
+                )
                 continue
 
             if isinstance(node, ast.Import):
@@ -331,11 +336,13 @@ class ProjectTestDataset:
                 # If ALL aliases are intra-project, replace the whole line.
                 # (Mixed external+internal in one `import` is extremely rare.)
                 if all_intra:
-                    rewrites.append((
-                        node.lineno,
-                        node.end_lineno or node.lineno,
-                        "\n".join(replacement_lines),
-                    ))
+                    rewrites.append(
+                        (
+                            node.lineno,
+                            node.end_lineno or node.lineno,
+                            "\n".join(replacement_lines),
+                        )
+                    )
 
         if not rewrites:
             return future_features, text, namespace_names
@@ -344,7 +351,7 @@ class ProjectTestDataset:
         out_lines = list(lines)
         for start, end, replacement in sorted(rewrites, key=lambda r: -r[0]):
             replacement_text = (replacement + "\n") if replacement else ""
-            out_lines[start - 1:end] = [replacement_text]
+            out_lines[start - 1 : end] = [replacement_text]
         return future_features, "".join(out_lines), namespace_names
 
     def load(self) -> List[BenchmarkCase]:
@@ -370,8 +377,7 @@ class ProjectTestDataset:
             for project_dir in sorted(base.iterdir()):
                 if not project_dir.is_dir():
                     continue
-                if (lang_name == "python"
-                        and project_dir.name in self._SKIP_PYTHON_PROJECTS):
+                if lang_name == "python" and project_dir.name in self._SKIP_PYTHON_PROJECTS:
                     log.info("Skipping unsupported project: %s", project_dir.name)
                     continue
 
@@ -411,7 +417,9 @@ class ProjectTestDataset:
 
                         if lang_name == "python":
                             futures, text, ns_needed = self._rewrite_python_file(
-                                text, intra_roots, submodule_stems,
+                                text,
+                                intra_roots,
+                                submodule_stems,
                             )
                             all_future.update(futures)
                             top_names = self._top_level_names(text)
@@ -419,13 +427,15 @@ class ProjectTestDataset:
                             ns_needed = set()
                             top_names = set()
 
-                        rewritten_files.append((
-                            src.relative_to(project_dir).as_posix(),
-                            src.stem,
-                            text,
-                            ns_needed,
-                            top_names,
-                        ))
+                        rewritten_files.append(
+                            (
+                                src.relative_to(project_dir).as_posix(),
+                                src.stem,
+                                text,
+                                ns_needed,
+                                top_names,
+                            )
+                        )
 
                 if not rewritten_files:
                     continue
@@ -457,9 +467,7 @@ class ProjectTestDataset:
                     # where ``BridgeCard`` lives in a file that comes later
                     # in the alphabet) no longer NameError at import time.
                     all_future.add("annotations")
-                    parts.append(
-                        "from __future__ import " + ", ".join(sorted(all_future))
-                    )
+                    parts.append("from __future__ import " + ", ".join(sorted(all_future)))
                     if used_namespaces:
                         parts.append("import types as _types")
                         for ns in sorted(used_namespaces):
@@ -482,10 +490,7 @@ class ProjectTestDataset:
                             # Back-fill the synthesised SimpleNamespace with
                             # every top-level name this file defines so
                             # later files can use ``utils.check_for_none``.
-                            binding_lines = [
-                                f"{stem}.{nm} = {nm}"
-                                for nm in sorted(top_names)
-                            ]
+                            binding_lines = [f"{stem}.{nm} = {nm}" for nm in sorted(top_names)]
                             block = (
                                 block
                                 + ("\n" if not block.endswith("\n") else "")
@@ -496,17 +501,44 @@ class ProjectTestDataset:
                     combined = "\n\n".join(parts)
                 else:
                     combined = "\n\n".join(
-                        f"# --- {rel} ---\n{text}"
-                        for rel, _, text, _, _ in rewritten_files
+                        f"# --- {rel} ---\n{text}" for rel, _, text, _, _ in rewritten_files
                     )
 
-                cases.append(BenchmarkCase(
-                    id=f"pt-{lang_name}-{project_dir.name}",
-                    code=combined,
-                    language=lang_name,
-                    metadata={"project": project_dir.name, "file_count": len(rewritten_files)},
-                    user_request="Generate comprehensive unit tests",
-                ))
+                # Build metadata for repo-context execution (Python only)
+                metadata: dict = {"project": project_dir.name, "file_count": len(rewritten_files)}
+                if lang_name == "python":
+                    metadata["execution_context"] = "repo"
+                    metadata["project_root"] = str(project_dir.resolve())
+                    metadata["project_name"] = project_dir.name
+                    # Best-effort target file: prefer a file matching the project name, else first .py
+                    target_candidates = [
+                        rel
+                        for rel, stem, _, _, _ in body_files + init_files
+                        if stem == project_dir.name
+                    ]
+                    if not target_candidates:
+                        target_candidates = [rel for rel, _, _, _, _ in body_files + init_files]
+                    if target_candidates:
+                        metadata["target_file"] = target_candidates[0]
+                    dep_files = (
+                        list(project_dir.rglob("requirements*.txt"))
+                        + list(project_dir.rglob("setup.py"))
+                        + list(project_dir.rglob("pyproject.toml"))
+                    )
+                    metadata["dependency_files"] = [
+                        str(f.relative_to(project_dir).as_posix()) for f in dep_files
+                    ]
+                    metadata["flattened_source_available"] = True
+
+                cases.append(
+                    BenchmarkCase(
+                        id=f"pt-{lang_name}-{project_dir.name}",
+                        code=combined,
+                        language=lang_name,
+                        metadata=metadata,
+                        user_request="Generate comprehensive unit tests",
+                    )
+                )
 
         # Fallback: scan root for JSONL manifests (older releases)
         if not cases:
@@ -523,13 +555,15 @@ class ProjectTestDataset:
                     if not code:
                         continue
                     lang = entry.get("language", "python").lower()
-                    cases.append(BenchmarkCase(
-                        id=f"pt-{i}",
-                        code=code,
-                        language=lang,
-                        metadata=entry,
-                        user_request="Generate comprehensive unit tests",
-                    ))
+                    cases.append(
+                        BenchmarkCase(
+                            id=f"pt-{i}",
+                            code=code,
+                            language=lang,
+                            metadata=entry,
+                            user_request="Generate comprehensive unit tests",
+                        )
+                    )
 
         log.info("Loaded %d cases from ProjectTest benchmark", len(cases))
         return cases

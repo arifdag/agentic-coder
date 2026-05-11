@@ -3,6 +3,7 @@
 from src.verification.dependency import DependencyValidator, extract_imports
 from src.verification.models import Finding, GateResult, JudgeVerdict, Severity, VerificationReport
 from src.verification.relevance import RelevanceValidator
+from src.verification.repo_context import RepoContextExecutor
 from src.verification.sast import SastAnalyzer
 
 
@@ -137,6 +138,19 @@ from source_module import func
         result = validator.validate(code)
         assert result.passed is True
         assert result.gate_name == "dependency"
+
+    def test_known_test_and_installed_submodule_imports_pass(self):
+        validator = DependencyValidator()
+        code = """
+import _pytest
+import sympy.printing
+import codeprinter
+import precedence
+from source_module import func
+"""
+        result = validator.validate(code)
+        assert result.passed is True
+        assert not result.findings
 
     def test_phantom_package_detected(self):
         validator = DependencyValidator(pypi_timeout=5)
@@ -326,6 +340,37 @@ class TestSandboxFixImports:
         assert "from source_module import *" in fixed
 
 
+class TestRepoContextExecutor:
+    """Tests for executing generated tests inside a real project layout."""
+
+    def test_executes_generated_tests_in_local_project(self, tmp_path):
+        project = tmp_path / "project"
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text(
+            "def add(a, b):\n" "    return a + b\n",
+            encoding="utf-8",
+        )
+
+        test_code = (
+            "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+        )
+
+        result = RepoContextExecutor(repo_setup="off").execute(
+            source_code="def add(a, b):\n    return a + b\n",
+            test_code=test_code,
+            metadata={"project_root": str(project), "target_file": "mypkg/core.py"},
+        )
+
+        assert result.success is True
+        assert result.tests_run == 1
+        assert result.tests_passed == 1
+        assert result.infrastructure_pass is True
+        if result.coverage_data is not None:
+            assert "files" in result.coverage_data
+
+
 class TestRelevanceValidator:
     """Tests for the test-relevance validator (anti-gaming gate).
 
@@ -346,6 +391,23 @@ class TestRelevanceValidator:
         result = v.validate(test, target_function="DetPiece")
         assert result.passed
         assert result.gate_name == "relevance"
+
+    def test_wildcard_import_with_target_call_passes(self):
+        v = RelevanceValidator()
+        test = "from source_module import *\n\n" "def test_add():\n" "    assert add(1, 2) == 3\n"
+        result = v.validate(test, target_function="add")
+        assert result.passed
+
+    def test_wildcard_import_with_unrelated_assertion_fails(self):
+        v = RelevanceValidator()
+        test = (
+            "from source_module import *\n\n"
+            "def test_add():\n"
+            "    value = 3\n"
+            "    assert value == 3\n"
+        )
+        result = v.validate(test, target_function="add")
+        assert not result.passed
 
     def test_calculator_gaming_case_is_caught(self):
         """The exact pattern observed in eval_results: LLM ignores the
@@ -414,6 +476,17 @@ class TestRelevanceValidator:
         result = v.validate(test, target_function="add")
         assert result.passed
 
+    def test_module_class_instantiation_signal_passes(self):
+        v = RelevanceValidator()
+        test = (
+            "import source_module\n\n"
+            "def test_card_rank():\n"
+            "    card = source_module.Card('A')\n"
+            "    assert card is not None\n"
+        )
+        result = v.validate(test, target_function="Card")
+        assert result.passed
+
     def test_dynamic_relevance_fails_when_target_not_executed(self):
         v = RelevanceValidator()
         source = "def add(a, b):\n    return a + b\n\ndef helper():\n    return 1\n"
@@ -460,6 +533,24 @@ class TestRelevanceValidator:
         )
         coverage = {"files": {"source_module.py": {"executed_lines": [1, 2]}}}
         result = v.validate_dynamic(test, source, coverage, target_function="add")
+        assert result.passed
+
+    def test_dynamic_relevance_matches_repo_source_file_path(self):
+        v = RelevanceValidator()
+        source = "def add(a, b):\n    return a + b\n"
+        test = (
+            "from source_module import add\n\n"
+            "def test_basic_math():\n"
+            "    assert add(1, 2) == 3\n"
+        )
+        coverage = {"files": {"mypkg/core.py": {"executed_lines": [1, 2]}}}
+        result = v.validate_dynamic(
+            test,
+            source,
+            coverage,
+            target_function="add",
+            source_file_path="mypkg/core.py",
+        )
         assert result.passed
 
     def test_snake_case_target_keywords_match(self):

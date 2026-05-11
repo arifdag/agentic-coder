@@ -444,8 +444,36 @@ DEFAULT_ALL_BENCHMARKS = [
     default=None,
     help="Quality metric mode",
 )
+@click.option(
+    "--execution-context",
+    type=click.Choice(["auto", "single-file", "repo"]),
+    default=None,
+    help="Execution context for Python tests",
+)
+@click.option(
+    "--repo-setup",
+    type=click.Choice(["auto", "prepare", "reuse", "off"]),
+    default=None,
+    help="Repository setup behavior for repo context",
+)
+@click.option(
+    "--gate-policy",
+    type=click.Choice(["strict", "balanced"]),
+    default=None,
+    help="Gate pass policy",
+)
 @click.option("--verbose", "-v", is_flag=True)
-def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
+def evaluate(
+    benchmark,
+    max_cases,
+    output_dir,
+    provider,
+    quality,
+    execution_context,
+    repo_setup,
+    gate_policy,
+    verbose,
+):
     """Run the pipeline against a benchmark dataset."""
     from .config import Config
     from .evaluation.benchmarks import get_dataset
@@ -455,6 +483,12 @@ def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
     config.pipeline.verbose = verbose
     if quality is not None:
         config.evaluation.quality_mode = quality
+    if execution_context is not None:
+        config.evaluation.execution_context = execution_context
+    if repo_setup is not None:
+        config.evaluation.repo_setup = repo_setup
+    if gate_policy is not None:
+        config.evaluation.gate_policy = gate_policy
     results_dir = output_dir or config.evaluation.results_dir
     max_cases = max_cases or config.evaluation.max_cases
 
@@ -498,6 +532,24 @@ def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
     help="Quality metric mode",
 )
 @click.option(
+    "--execution-context",
+    type=click.Choice(["auto", "single-file", "repo"]),
+    default=None,
+    help="Execution context for Python tests",
+)
+@click.option(
+    "--repo-setup",
+    type=click.Choice(["auto", "prepare", "reuse", "off"]),
+    default=None,
+    help="Repository setup behavior for repo context",
+)
+@click.option(
+    "--gate-policy",
+    type=click.Choice(["strict", "balanced"]),
+    default=None,
+    help="Gate pass policy",
+)
+@click.option(
     "--variants",
     type=str,
     default=None,
@@ -509,7 +561,19 @@ def evaluate(benchmark, max_cases, output_dir, provider, quality, verbose):
     ),
 )
 @click.option("--verbose", "-v", is_flag=True)
-def ablation(benchmark, max_cases, axes, output_dir, provider, quality, variants, verbose):
+def ablation(
+    benchmark,
+    max_cases,
+    axes,
+    output_dir,
+    provider,
+    quality,
+    execution_context,
+    repo_setup,
+    gate_policy,
+    variants,
+    verbose,
+):
     """Run ablation studies across config variants."""
     from .config import Config
     from .evaluation.ablation import AblationRunner
@@ -519,6 +583,12 @@ def ablation(benchmark, max_cases, axes, output_dir, provider, quality, variants
     config.pipeline.verbose = verbose
     if quality is not None:
         config.evaluation.quality_mode = quality
+    if execution_context is not None:
+        config.evaluation.execution_context = execution_context
+    if repo_setup is not None:
+        config.evaluation.repo_setup = repo_setup
+    if gate_policy is not None:
+        config.evaluation.gate_policy = gate_policy
     results_dir = output_dir or config.evaluation.results_dir
 
     axes_list = [a.strip() for a in axes.split(",")]

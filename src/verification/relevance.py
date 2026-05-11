@@ -282,6 +282,7 @@ def _call_target_signals(
                 instantiated_target = True
         elif isinstance(func, ast.Attribute):
             value = func.value
+            # Detect target calls through module aliases: sm.Target(), sm.func().
             if isinstance(value, ast.Name) and value.id in module_aliases:
                 if func.attr.lower() in target_lowers:
                     module_call = True
@@ -292,6 +293,37 @@ def _call_target_signals(
     return direct_call, module_call, instantiated_target
 
 
+def _asserts_target_or_source(
+    tree: ast.AST,
+    targets: Iterable[str],
+    imported_aliases: set[str],
+    module_aliases: set[str],
+) -> bool:
+    """Check whether any assert expression references the target or source module alias."""
+    target_lowers = {target.lower() for target in targets}
+    imported_lowers = {alias.lower() for alias in imported_aliases}
+    module_alias_set = {alias for alias in module_aliases}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        for child in ast.walk(node.test):
+            if isinstance(child, ast.Name):
+                name_lower = child.id.lower()
+                if name_lower in imported_lowers or name_lower in target_lowers:
+                    return True
+            elif isinstance(child, ast.Attribute):
+                if (
+                    isinstance(child.value, ast.Name)
+                    and child.value.id in module_alias_set
+                    and child.attr.lower() in target_lowers
+                ):
+                    return True
+                if child.attr.lower() in target_lowers:
+                    return True
+    return False
+
+
 def analyze_relevance(
     test_code: str,
     source_code: Optional[str] = None,
@@ -299,6 +331,7 @@ def analyze_relevance(
     *,
     source_module: str = _DEFAULT_SOURCE_MODULE,
     min_relevance_signals: int = 1,
+    gate_policy: str = "balanced",
 ) -> RelevanceAnalysis:
     """Analyze static test relevance using balanced anti-gaming evidence."""
     if not test_code or not test_code.strip():
@@ -343,6 +376,12 @@ def analyze_relevance(
     imports_source, module_aliases = _imports_source_module(tree, source_module)
     wildcard_imported = _has_wildcard_source_import(tree, source_module)
     imported_aliases = _imported_target_aliases(tree, source_module, targets)
+    asserts_target_or_source = _asserts_target_or_source(
+        tree,
+        targets,
+        imported_aliases,
+        module_aliases,
+    )
 
     keywords: list[str] = []
     for target in targets:
@@ -369,6 +408,7 @@ def analyze_relevance(
         "calls_target_directly": direct_call,
         "calls_target_via_module": module_call,
         "instantiates_target": instantiated_target,
+        "asserts_target_or_source": asserts_target_or_source,
     }
     negative_signals = {
         "no_test_functions": not test_names,
@@ -384,6 +424,7 @@ def analyze_relevance(
             "calls_target_directly",
             "calls_target_via_module",
             "instantiates_target",
+            "asserts_target_or_source",
         )
         if signals[key]
     )
@@ -395,16 +436,30 @@ def analyze_relevance(
         + (1 if signals["wildcard_source_import"] else 0)
         + (1 if signals["imports_source_module"] else 0)
         + (1 if signals["test_name_references_target"] else 0)
+        + (1 if signals["asserts_target_or_source"] else 0)
     )
 
     if not targets:
         static_passed = imports_source and bool(test_names)
     else:
+        # Balanced mode: accept wildcard source imports + real assertions
+        # as sufficient only when the assertion/call references the target.
+        balanced_wildcard_pass = (
+            gate_policy == "balanced"
+            and wildcard_imported
+            and (direct_call or module_call or instantiated_target or asserts_target_or_source)
+            and not negative_signals.get("no_assertions", True)
+            and not negative_signals.get("dummy_assertions_only", True)
+            and not negative_signals.get("target_redefined", True)
+            and not negative_signals.get("no_test_functions", True)
+            and assertion_count > 0
+            and bool(test_names)
+        )
         static_passed = (
             score >= max(1, int(min_relevance_signals))
             and strong_signal_count > 0
             and not any(negative_signals.values())
-        )
+        ) or balanced_wildcard_pass
 
     details = (
         f"score={score}; strong={strong_signal_count}; signals={json.dumps(signals, sort_keys=True)}; "
@@ -426,17 +481,38 @@ def analyze_relevance(
     )
 
 
-def _coverage_file_entry(coverage_data: dict | None, source_module: str) -> Optional[dict]:
+def _coverage_file_entry(
+    coverage_data: dict | None,
+    source_module: str,
+    source_file_path: str | None = None,
+) -> Optional[dict]:
     if not isinstance(coverage_data, dict):
         return None
     files = coverage_data.get("files")
     if not isinstance(files, dict):
         return None
-    expected = f"{source_module}.py"
+    # Build candidate names to match in coverage data
+    candidates = {f"{source_module}.py"}
+    if source_file_path:
+        candidates.add(PurePath(str(source_file_path).replace("\\", "/")).name)
+        mod_from_path = source_file_path.replace("/", ".").replace("\\", ".").removesuffix(".py")
+        candidates.add(f"{mod_from_path}.py")
+        candidates.add(str(PurePath(str(source_file_path).replace("\\", "/"))))
     for path, entry in files.items():
-        name = PurePath(str(path).replace("\\", "/")).name
-        if name == expected:
+        normalized_path = str(PurePath(str(path).replace("\\", "/")))
+        normalized = PurePath(normalized_path)
+        if (
+            normalized.name in candidates
+            or normalized_path in candidates
+            or any(normalized_path.endswith(f"/{candidate}") for candidate in candidates)
+        ):
             return entry if isinstance(entry, dict) else None
+    # Fallback: match by stem of source_module if it contains dots
+    if "." in source_module:
+        stem = source_module.rsplit(".", 1)[-1]
+        for path, entry in files.items():
+            if PurePath(str(path).replace("\\", "/")).stem == stem:
+                return entry if isinstance(entry, dict) else None
     return None
 
 
@@ -446,6 +522,7 @@ def compute_target_coverage(
     target_function: Optional[str] = None,
     *,
     source_module: str = _DEFAULT_SOURCE_MODULE,
+    source_file_path: str | None = None,
 ) -> dict[str, Any]:
     """Compute target-line and target-branch coverage from coverage.py JSON."""
     targets = infer_target_infos(source_code, target_function)
@@ -463,7 +540,7 @@ def compute_target_coverage(
     if not target or not target.executable_lines:
         return out
 
-    entry = _coverage_file_entry(coverage_data, source_module)
+    entry = _coverage_file_entry(coverage_data, source_module, source_file_path)
     if not entry:
         return out
 
@@ -510,9 +587,11 @@ class RelevanceValidator:
         self,
         source_module: str = _DEFAULT_SOURCE_MODULE,
         min_relevance_signals: int = 1,
+        gate_policy: str = "balanced",
     ) -> None:
         self.source_module = source_module
         self.min_relevance_signals = max(1, int(min_relevance_signals))
+        self.gate_policy = gate_policy if gate_policy in {"strict", "balanced"} else "balanced"
 
     def validate(
         self,
@@ -528,6 +607,7 @@ class RelevanceValidator:
             target_function=target_function,
             source_module=self.source_module,
             min_relevance_signals=self.min_relevance_signals,
+            gate_policy=self.gate_policy,
         )
         findings = self._analysis_findings(analysis)
         return GateResult(
@@ -543,6 +623,7 @@ class RelevanceValidator:
         source_code: str,
         coverage_data: dict | None,
         target_function: Optional[str] = None,
+        source_file_path: str | None = None,
     ) -> GateResult:
         """Evaluate post-sandbox relevance using target coverage evidence."""
         analysis = analyze_relevance(
@@ -551,12 +632,14 @@ class RelevanceValidator:
             target_function=target_function,
             source_module=self.source_module,
             min_relevance_signals=self.min_relevance_signals,
+            gate_policy=self.gate_policy,
         )
         target_cov = compute_target_coverage(
             coverage_data,
             source_code,
             target_function=target_function,
             source_module=self.source_module,
+            source_file_path=source_file_path,
         )
         findings = self._analysis_findings(analysis)
         target_line_coverage = target_cov.get("target_line_coverage")
@@ -593,7 +676,11 @@ class RelevanceValidator:
             )
             passed = False
         else:
-            passed = analysis.passed
+            # Dynamic coverage is stronger evidence than import shape;
+            # positive target coverage passes even with static weak signals.
+            passed = analysis.passed or (
+                self.gate_policy == "balanced" and float(target_line_coverage) > 0.0
+            )
 
         return GateResult(
             gate_name="target_relevance",

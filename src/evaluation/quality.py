@@ -127,15 +127,26 @@ def compute_relevance_metrics(
     metadata: dict | None = None,
     passed: bool | None = None,
     coverage_data: dict | None = None,
+    source_module: str | None = None,
+    source_file_path: str | None = None,
 ) -> dict[str, Any]:
     """Measure whether generated tests appear to target the requested code."""
+    metadata = metadata or {}
+    source_file_path = source_file_path or metadata.get("target_file") or metadata.get("code_file")
     target = infer_primary_target(source_code, metadata)
-    analysis = analyze_relevance(
-        test_code,
+    analysis_kwargs = dict(test_code=test_code, source_code=source_code, target_function=target)
+    if source_module is not None:
+        analysis_kwargs["source_module"] = source_module
+    analysis = analyze_relevance(**analysis_kwargs)
+    cov_kwargs = dict(
+        coverage_data=coverage_data,
         source_code=source_code,
         target_function=target,
+        source_file_path=source_file_path,
     )
-    target_cov = compute_target_coverage(coverage_data, source_code, target_function=target)
+    if source_module is not None:
+        cov_kwargs["source_module"] = source_module
+    target_cov = compute_target_coverage(**cov_kwargs)
     dynamic_pass = True
     if target_cov.get("target_line_coverage") is not None:
         dynamic_pass = float(target_cov["target_line_coverage"]) > 0.0
@@ -225,8 +236,11 @@ def compute_coverage_metrics(
     source_code: str,
     metadata: dict | None = None,
     line_coverage: float | None = None,
+    source_file_path: str | None = None,
 ) -> dict[str, Any]:
     """Extract line, branch, and target coverage metrics from coverage.py JSON."""
+    metadata = metadata or {}
+    source_file_path = source_file_path or metadata.get("target_file") or metadata.get("code_file")
     out: dict[str, Any] = {"line_coverage": line_coverage}
     if not coverage_data:
         return out
@@ -240,7 +254,12 @@ def compute_coverage_metrics(
             out["branch_coverage"] = float(branch)
 
     target = infer_primary_target(source_code, metadata)
-    target_cov = compute_target_coverage(coverage_data, source_code, target_function=target)
+    target_cov = compute_target_coverage(
+        coverage_data,
+        source_code,
+        target_function=target,
+        source_file_path=source_file_path,
+    )
     for key, value in target_cov.items():
         if value is not None:
             out[key] = value

@@ -89,6 +89,7 @@ class BenchmarkRunner:
                 max_retries=self.config.pipeline.max_retries,
                 config=self.config,
                 target_function=infer_primary_target(case.code, case.metadata),
+                repo_metadata=case.metadata,
             )
             elapsed = time.time() - start
 
@@ -107,6 +108,25 @@ class BenchmarkRunner:
 
             quality_payload = self._build_quality_payload(case, state, gates, coverage_val)
 
+            execution_context = state.get("execution_context") or "single-file"
+            repo_meta = case.metadata
+            eligible = bool(
+                repo_meta.get("execution_context") == "repo"
+                or repo_meta.get("project_root")
+                or repo_meta.get("repo")
+            )
+            infrastructure_pass = state.get("infrastructure_pass")
+            repo_setup_pass = state.get("repo_setup_pass")
+            execution_metrics = {
+                "execution_context": execution_context,
+                "eligible": eligible,
+                "infrastructure_pass": infrastructure_pass if eligible else None,
+                "repo_setup_pass": repo_setup_pass if eligible else None,
+                "infrastructure_failure_reason": (
+                    state.get("error_message") if infrastructure_pass is False else None
+                ),
+            }
+
             return EvalResult(
                 case_id=case.id,
                 passed=state.get("status") == "success",
@@ -123,6 +143,7 @@ class BenchmarkRunner:
                     "error_type": state.get("error_type"),
                     "error_message": state.get("error_message"),
                 },
+                execution_metrics=execution_metrics,
                 **quality_payload,
             )
         except Exception as exc:
@@ -149,11 +170,13 @@ class BenchmarkRunner:
 
         test_code = state.get("generated_tests") or ""
         passed = state.get("status") == "success"
+        source_file_path = case.metadata.get("target_file") or case.metadata.get("code_file")
         coverage_metrics = compute_coverage_metrics(
             state.get("sandbox_coverage_data"),
             case.code,
             case.metadata,
             line_coverage=coverage_val,
+            source_file_path=source_file_path,
         )
         if state.get("sandbox_branch_coverage") is not None:
             coverage_metrics.setdefault("branch_coverage", state.get("sandbox_branch_coverage"))
@@ -207,6 +230,7 @@ class BenchmarkRunner:
                 case.metadata,
                 passed=sandbox_passed,
                 coverage_data=state.get("sandbox_coverage_data"),
+                source_file_path=source_file_path,
             ),
             "safety_metrics": gate_metrics["safety_metrics"],
             "dependency_metrics": gate_metrics["dependency_metrics"],
