@@ -7,25 +7,33 @@ import httpx
 import pytest
 
 from src.config import (
+    _PROVIDER_COOLDOWN,
     PROVIDER_PROFILES,
     LLMConfig,
     RoleConfig,
-    _is_rate_limit_error,
     _build_role_configs,
     _classify_and_cooldown,
     _cooldown_key,
     _get_cooldown,
-    _PROVIDER_COOLDOWN,
+    _is_rate_limit_error,
     get_llm_with_fallback,
 )
 from src.verification.judge import SastJudge, _extract_json
-from src.verification.models import Finding, Severity
 
 
 class TestProviderRegistry:
     def test_all_recommended_providers_registered(self):
-        for name in ("groq", "gemini", "cerebras", "mistral", "github",
-                     "sambanova", "openrouter", "ollama", "openai_compat"):
+        for name in (
+            "groq",
+            "gemini",
+            "cerebras",
+            "mistral",
+            "github",
+            "sambanova",
+            "openrouter",
+            "ollama",
+            "openai_compat",
+        ):
             assert name in PROVIDER_PROFILES, f"missing provider: {name}"
 
     def test_ollama_profile_points_at_cloud_endpoint(self):
@@ -91,6 +99,21 @@ class TestRoleConfig:
         assert len(coding.fallbacks) == 1
         assert coding.fallbacks[0].provider == "groq"
 
+    def test_provider_override_takes_precedence_over_coding_role(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_API_KEY", "fake-ollama")
+        monkeypatch.setenv("OPENCODE_API_KEY", "fake-opencode")
+        monkeypatch.setenv("CODING_PROVIDER", "opencode")
+        monkeypatch.setenv("CODING_MODEL", "deepseek-v4-pro")
+        monkeypatch.setenv("DEFAULT_MODEL", "llama-3.3-70b-versatile")
+
+        coding, _, llm = _build_role_configs(provider_override="ollama")
+
+        assert llm.provider == "ollama"
+        assert llm.model == PROVIDER_PROFILES["ollama"]["default_model"]
+        assert coding is not None
+        assert coding.primary.provider == "ollama"
+        assert coding.primary.model == PROVIDER_PROFILES["ollama"]["default_model"]
+
     def test_fallbacks_without_api_key_are_skipped(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_API_KEY", "fake-google")
         monkeypatch.setenv("CODING_PROVIDER", "gemini")
@@ -112,9 +135,7 @@ class TestRoleConfig:
         role = RoleConfig(primary=primary, fallbacks=[fb])
         prov = role.provenance()
         assert prov["primary"] == {"provider": "gemini", "model": "gemini-2.5-flash"}
-        assert prov["fallbacks"] == [
-            {"provider": "groq", "model": "llama-3.3-70b-versatile"}
-        ]
+        assert prov["fallbacks"] == [{"provider": "groq", "model": "llama-3.3-70b-versatile"}]
 
 
 class TestRateLimitDetection:
@@ -257,9 +278,7 @@ class TestFallbackChain:
         os.environ["LLM_TRANSIENT_RETRIES"] = "2"
         os.environ["LLM_TRANSIENT_BACKOFF"] = "0.0"  # no real sleep in tests
 
-        resp_503 = httpx.Response(
-            status_code=503, request=httpx.Request("POST", "http://x")
-        )
+        resp_503 = httpx.Response(status_code=503, request=httpx.Request("POST", "http://x"))
         primary_llm = MagicMock()
         # Two transient 503s, then succeed on the SAME endpoint.
         primary_llm._generate.side_effect = [
@@ -271,9 +290,7 @@ class TestFallbackChain:
 
         with patch("src.config.get_llm") as mock_get:
             mock_get.side_effect = [primary_llm, fallback_llm]
-            primary = LLMConfig(
-                provider="ollama", model="deepseek-v4-pro:cloud", api_key="k1"
-            )
+            primary = LLMConfig(provider="ollama", model="deepseek-v4-pro:cloud", api_key="k1")
             fb = LLMConfig(provider="mistral", model="codestral-latest", api_key="k2")
             role = RoleConfig(primary=primary, fallbacks=[fb])
             chain = get_llm_with_fallback(role)
@@ -288,9 +305,7 @@ class TestFallbackChain:
         os.environ["LLM_TRANSIENT_RETRIES"] = "2"
         os.environ["LLM_TRANSIENT_BACKOFF"] = "0.0"
 
-        resp_503 = httpx.Response(
-            status_code=503, request=httpx.Request("POST", "http://x")
-        )
+        resp_503 = httpx.Response(status_code=503, request=httpx.Request("POST", "http://x"))
         primary_llm = MagicMock()
         primary_llm._generate.side_effect = httpx.HTTPStatusError(
             "503", request=resp_503.request, response=resp_503
@@ -300,9 +315,7 @@ class TestFallbackChain:
 
         with patch("src.config.get_llm") as mock_get:
             mock_get.side_effect = [primary_llm, fallback_llm]
-            primary = LLMConfig(
-                provider="ollama", model="deepseek-v4-pro:cloud", api_key="k1"
-            )
+            primary = LLMConfig(provider="ollama", model="deepseek-v4-pro:cloud", api_key="k1")
             fb = LLMConfig(provider="mistral", model="codestral-latest", api_key="k2")
             role = RoleConfig(primary=primary, fallbacks=[fb])
             chain = get_llm_with_fallback(role)
@@ -319,9 +332,7 @@ class TestFallbackChain:
         os.environ["LLM_TRANSIENT_RETRIES"] = "2"
         os.environ["LLM_TRANSIENT_BACKOFF"] = "0.0"
 
-        resp_429 = httpx.Response(
-            status_code=429, request=httpx.Request("POST", "http://x")
-        )
+        resp_429 = httpx.Response(status_code=429, request=httpx.Request("POST", "http://x"))
         primary_llm = MagicMock()
         primary_llm._generate.side_effect = httpx.HTTPStatusError(
             "429", request=resp_429.request, response=resp_429
@@ -331,9 +342,7 @@ class TestFallbackChain:
 
         with patch("src.config.get_llm") as mock_get:
             mock_get.side_effect = [primary_llm, fallback_llm]
-            primary = LLMConfig(
-                provider="ollama", model="deepseek-v4-pro:cloud", api_key="k1"
-            )
+            primary = LLMConfig(provider="ollama", model="deepseek-v4-pro:cloud", api_key="k1")
             fb = LLMConfig(provider="mistral", model="codestral-latest", api_key="k2")
             role = RoleConfig(primary=primary, fallbacks=[fb])
             chain = get_llm_with_fallback(role)
@@ -411,6 +420,7 @@ class TestCooldown:
         """If primary is in cooldown, chain should use fallback immediately
         without making a request to the primary."""
         from unittest.mock import MagicMock, patch
+
         primary_llm = MagicMock()
         primary_llm._generate = MagicMock(side_effect=AssertionError("should not be called"))
         fallback_llm = MagicMock()
@@ -431,6 +441,7 @@ class TestCooldown:
 
 def _time_plus(seconds: float) -> float:
     import time
+
     return time.time() + seconds
 
 
@@ -470,6 +481,7 @@ class TestJsonHardening:
         response = '```json\n[{"index": 0, "verdict": "false_positive"}]\n```'
         verdicts = judge._parse_verdicts(response, count=1)
         from src.verification.models import JudgeVerdict
+
         assert verdicts[0] == JudgeVerdict.FALSE_POSITIVE
 
     def test_sast_judge_handles_single_object_response(self):
@@ -477,4 +489,5 @@ class TestJsonHardening:
         response = '{"index": 0, "verdict": "true_positive"}'
         verdicts = judge._parse_verdicts(response, count=1)
         from src.verification.models import JudgeVerdict
+
         assert verdicts[0] == JudgeVerdict.TRUE_POSITIVE

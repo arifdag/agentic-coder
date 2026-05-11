@@ -5,9 +5,13 @@ pipeline can survive free-tier rate limits by rotating to a backup provider.
 """
 
 import os
+import threading as _threading
+import time as _time
 from typing import Any, ClassVar, Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Dict as _Dict
+
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -458,9 +462,14 @@ def _build_role_configs(
         2. CODING_PROVIDER / CODING_MODEL
         3. LLM_PROVIDER / DEFAULT_MODEL (legacy single-provider path)
     """
-    # Legacy single-provider compat
-    legacy_provider = provider_override or os.getenv("LLM_PROVIDER", "groq")
-    legacy_llm = LLMConfig.from_env(legacy_provider)
+    # Legacy single-provider compat. For an explicit CLI provider override,
+    # use the provider profile's default model instead of DEFAULT_MODEL from
+    # .env, because DEFAULT_MODEL may belong to a different provider.
+    if provider_override:
+        legacy_llm = LLMConfig.from_spec(provider_override)
+    else:
+        legacy_provider = os.getenv("LLM_PROVIDER", "groq")
+        legacy_llm = LLMConfig.from_env(legacy_provider)
 
     def _role_from_env(
         primary_prov_key: str, primary_model_key: str, fallback_key: str
@@ -486,7 +495,21 @@ def _build_role_configs(
 
         return RoleConfig(primary=primary, fallbacks=fallbacks)
 
-    coding_role = _role_from_env("CODING_PROVIDER", "CODING_MODEL", "CODING_FALLBACKS")
+    if provider_override:
+        fallbacks: List[LLMConfig] = []
+        for spec in _parse_chain(os.getenv("CODING_FALLBACKS")):
+            try:
+                cfg = LLMConfig.from_spec(spec)
+                same_endpoint = (
+                    cfg.provider == legacy_llm.provider and cfg.model == legacy_llm.model
+                )
+                if cfg.api_key and not same_endpoint:
+                    fallbacks.append(cfg)
+            except Exception:
+                continue
+        coding_role = RoleConfig(primary=legacy_llm, fallbacks=fallbacks)
+    else:
+        coding_role = _role_from_env("CODING_PROVIDER", "CODING_MODEL", "CODING_FALLBACKS")
     judge_role = _role_from_env("JUDGE_PROVIDER", "JUDGE_MODEL", "JUDGE_FALLBACKS")
 
     # If new-style env isn't set, synthesize a one-endpoint RoleConfig from
@@ -552,10 +575,10 @@ def _build_openai_compat_chat(
 ):
     """Generic OpenAI-compatible chat model (works for Gemini, Cerebras,
     Mistral, SambaNova, OpenRouter, GitHub Models, custom self-hosted, ...)."""
+    import httpx
     from langchain_core.language_models.chat_models import BaseChatModel
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
-    import httpx
 
     class OpenAICompatChat(BaseChatModel):
         api_key: str
@@ -626,10 +649,6 @@ def _build_openai_compat_chat(
 # are "provider:model"; values are the earliest wall-clock time (epoch
 # seconds) when that endpoint may be tried again.
 # ────────────────────────────────────────────────────────────────────────
-
-import time as _time
-import threading as _threading
-from typing import Dict as _Dict
 
 _PROVIDER_COOLDOWN: _Dict[str, float] = {}
 _COOLDOWN_LOCK = _threading.Lock()
@@ -897,7 +916,6 @@ def get_llm_with_fallback(role: RoleConfig):
         return get_llm(endpoints[0])
 
     from langchain_core.language_models.chat_models import BaseChatModel
-    from langchain_core.outputs import ChatResult
 
     built = [(cfg, get_llm(cfg)) for cfg in endpoints if cfg.api_key]
     if not built:
@@ -934,13 +952,11 @@ def get_llm_with_fallback(role: RoleConfig):
 
             for cycle in range(max_wait_cycles):
                 # First pass: try any endpoint that isn't cooling down.
-                all_in_cooldown = True
                 for cfg, llm in self.endpoints_:
                     key = _cooldown_key(cfg.provider, cfg.model)
                     remaining = _get_cooldown(key)
                     if remaining > 0:
                         continue  # skip cooling endpoint
-                    all_in_cooldown = False
 
                     # ─── Same-endpoint retry loop (transient errors only) ───
                     final_exc: Optional[BaseException] = None
