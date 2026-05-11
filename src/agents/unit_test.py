@@ -35,6 +35,9 @@ class RepairContext(BaseModel):
     diagnostics: Optional[str] = Field(
         default=None, description="Full structured diagnostics from verification report"
     )
+    import_module: Optional[str] = Field(
+        default=None, description="Real repo module path to import from when available"
+    )
 
 
 SYSTEM_PROMPT = """You are an expert Python test engineer. Your task is to generate high-quality pytest unit tests.
@@ -119,6 +122,7 @@ Error encountered:
 {suggestion_info}
 {diagnostics_section}
 {coverage_section}
+{import_context_section}
 
 Repair rules (apply all that match the diagnostics above):
 - relevance / tests_unrelated_to_source / target_not_relevant: The test does not
@@ -225,16 +229,30 @@ class UnitTestAgent:
                 imports.append(stripped)
         return imports
 
-    def _build_context_section(self, file_path: Optional[str] = None) -> str:
+    def _build_context_section(
+        self,
+        file_path: Optional[str] = None,
+        import_module: Optional[str] = None,
+    ) -> str:
         """Build context section for the prompt.
 
         Args:
             file_path: Optional file path for context
+            import_module: Exact real module path for repo-context execution
 
         Returns:
             Context section string
         """
         sections = []
+
+        if import_module:
+            sections.append(
+                "Repo-context import module: "
+                f"{import_module}\n"
+                f"Use this exact module path in imports, e.g. "
+                f"from {import_module} import <target>. "
+                "Do NOT import from source_module in repo-context runs."
+            )
 
         if file_path:
             module_name = file_path.replace(".py", "").replace("/", ".").replace("\\", ".")
@@ -248,17 +266,19 @@ class UnitTestAgent:
         self,
         code: str,
         file_path: Optional[str] = None,
+        import_module: Optional[str] = None,
     ) -> GeneratedTest:
         """Generate unit tests for the given code.
 
         Args:
             code: Source code to generate tests for
             file_path: Optional file path for import context
+            import_module: Exact real module path for repo-context execution
 
         Returns:
             Generated test result
         """
-        context_section = self._build_context_section(file_path)
+        context_section = self._build_context_section(file_path, import_module)
 
         prompt = GENERATION_TEMPLATE.format(
             code=code,
@@ -314,6 +334,15 @@ class UnitTestAgent:
                 f"Please add tests targeting these uncovered lines."
             )
 
+        import_context_section = ""
+        if context.import_module:
+            import_context_section = (
+                "\nRepo-context import module:\n"
+                f"- Import from: {context.import_module}\n"
+                "- Do NOT use source_module in repo-context repairs.\n"
+                f"- Example form: from {context.import_module} import <target>"
+            )
+
         prompt = REPAIR_TEMPLATE.format(
             previous_code=context.previous_code,
             error_type=context.error_type,
@@ -322,6 +351,7 @@ class UnitTestAgent:
             suggestion_info=suggestion_info,
             diagnostics_section=diagnostics_section,
             coverage_section=coverage_section,
+            import_context_section=import_context_section,
         )
 
         messages = [

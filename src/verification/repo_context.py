@@ -25,12 +25,25 @@ _GENERATED_DIR = ".llm_agent_generated"
 _TEST_FILE = "test_generated.py"
 
 
+def _tail(text: str, limit: int = 800) -> str:
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:]
+
+
 class RepoContextExecutor:
     """Execute generated tests against a real project checkout or worktree."""
 
-    def __init__(self, repo_setup: str = "auto", gate_policy: str = "strict"):
+    def __init__(
+        self,
+        repo_setup: str = "auto",
+        gate_policy: str = "strict",
+        pytest_timeout: Optional[int] = None,
+    ):
         self.repo_setup = repo_setup
         self.gate_policy = gate_policy
+        self._pytest_timeout = pytest_timeout
+        self._last_repo_error: Optional[str] = None
         self._parser = SandboxExecutor()
         self._repos_cache = Path(
             os.getenv("LLM_AGENT_REPO_CACHE", str(_DEFAULT_REPOS_CACHE))
@@ -75,11 +88,14 @@ class RepoContextExecutor:
             elif repo_url:
                 temp_repo = self._clone_remote(repo_url, base_commit)
                 if temp_repo is None:
+                    message = self._last_repo_error or (
+                        f"Failed to clone/checkout repo: {repo_url} @ {base_commit}"
+                    )
                     return ExecutionResult(
                         success=False,
                         exit_code=-1,
                         error_type="infrastructure_error",
-                        error_message=f"Failed to clone/checkout repo: {repo_url} @ {base_commit}",
+                        error_message=message,
                         infrastructure_pass=False,
                     )
             else:
@@ -92,22 +108,34 @@ class RepoContextExecutor:
                 )
 
             setup_ok, setup_msg = self._setup_dependencies(temp_repo)
-            if not setup_ok:
-                return ExecutionResult(
-                    success=False,
-                    exit_code=-1,
-                    error_type="infrastructure_error",
-                    error_message=setup_msg,
-                    repo_setup_pass=False,
-                    infrastructure_pass=False,
-                )
+            # prepare=strict, auto=best-effort, off/reuse=skip
+            if self.repo_setup == "prepare":
+                if not setup_ok:
+                    return ExecutionResult(
+                        success=False,
+                        exit_code=-1,
+                        error_type="infrastructure_error",
+                        error_message=setup_msg,
+                        repo_setup_pass=False,
+                        infrastructure_pass=False,
+                    )
+                repo_setup_pass = True
+            elif self.repo_setup in ("off", "reuse"):
+                repo_setup_pass = None  # skipped, not a failure
+            else:  # auto
+                repo_setup_pass = setup_ok if setup_ok else False
 
             gen_dir = temp_repo / _GENERATED_DIR
             gen_dir.mkdir(parents=True, exist_ok=True)
             test_path = gen_dir / _TEST_FILE
             test_path.write_text(test_code, encoding="utf-8")
 
-            return self._run_pytest(temp_repo, test_path, metadata)
+            result = self._run_pytest(temp_repo, test_path, metadata)
+            result.repo_setup_pass = repo_setup_pass
+            if repo_setup_pass is False and setup_msg:
+                setup_details = f"[repo setup warning]\n{setup_msg}\n"
+                result.stderr = f"{setup_details}\n{result.stderr or ''}"
+            return result
 
         finally:
             if temp_repo is not None:
@@ -125,8 +153,10 @@ class RepoContextExecutor:
         return dest / "project"
 
     def _clone_remote(self, repo_url: str, base_commit: Optional[str]) -> Optional[Path]:
+        self._last_repo_error = None
         if not shutil.which("git"):
-            log.warning("git not available for repo-context execution")
+            self._last_repo_error = "git not available for repo-context execution"
+            log.warning(self._last_repo_error)
             return None
 
         self._repos_cache.mkdir(parents=True, exist_ok=True)
@@ -135,36 +165,113 @@ class RepoContextExecutor:
         repo_name = repo_name.removesuffix(".git") or "repo"
         cache_path = self._repos_cache / repo_name
 
-        try:
-            if cache_path.exists():
-                subprocess.run(
-                    ["git", "-C", str(cache_path), "fetch", "origin"],
-                    capture_output=True,
-                    timeout=60,
-                    check=True,
+        def _git_safe(args: List[str], timeout: int) -> subprocess.CompletedProcess:
+            safe_args = ["git", "-c", f"safe.directory={str(cache_path)}"] + args[1:]
+            return subprocess.run(
+                safe_args,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+
+        def _diagnostic(step: str, proc: subprocess.CompletedProcess) -> str:
+            stderr = proc.stderr.decode(errors="replace") if proc.stderr else ""
+            command = " ".join(str(part) for part in getattr(proc, "args", []) or [])
+            return (
+                f"Git {step} failed for {clone_url} at cache {cache_path}"
+                f"{f' (commit {base_commit})' if base_commit else ''}. "
+                f"Command: {command or step}. "
+                f"Return code: {proc.returncode}. "
+                f"Stderr: {_tail(stderr)}"
+            )
+
+        def _remove_cache() -> None:
+            try:
+                shutil.rmtree(cache_path, ignore_errors=True)
+            except Exception:
+                pass
+
+        def _try_clone_or_fetch(retrying: bool = False) -> Optional[Path]:
+            try:
+                if cache_path.exists():
+                    # Verify it looks like a git repo
+                    git_dir = cache_path / ".git"
+                    if not git_dir.exists() or not git_dir.is_dir():
+                        message = f"Cache {cache_path} for {clone_url} is not a git repo"
+                        if not retrying:
+                            log.warning("%s; removing and retrying", message)
+                            _remove_cache()
+                            return _try_clone_or_fetch(retrying=True)
+                        self._last_repo_error = message
+                        log.warning("%s after retry", message)
+                        return None
+
+                    proc = _git_safe(
+                        ["git", "-C", str(cache_path), "fetch", "origin"],
+                        timeout=60,
+                    )
+                    if proc.returncode != 0:
+                        message = _diagnostic("fetch", proc)
+                        if not retrying:
+                            log.warning(
+                                "Git fetch failed for %s; removing cache and retrying", cache_path
+                            )
+                            _remove_cache()
+                            return _try_clone_or_fetch(retrying=True)
+                        self._last_repo_error = message
+                        log.warning(message)
+                        return None
+                else:
+                    proc = _git_safe(
+                        ["git", "clone", clone_url, str(cache_path)],
+                        timeout=120,
+                    )
+                    if proc.returncode != 0:
+                        message = _diagnostic("clone", proc)
+                        if not retrying:
+                            log.warning("Git clone failed for %s; retrying once", cache_path)
+                            _remove_cache()
+                            return _try_clone_or_fetch(retrying=True)
+                        self._last_repo_error = message
+                        log.warning(message)
+                        return None
+
+                if base_commit:
+                    proc = _git_safe(
+                        ["git", "-C", str(cache_path), "checkout", base_commit],
+                        timeout=60,
+                    )
+                    if proc.returncode != 0:
+                        message = _diagnostic("checkout", proc)
+                        if not retrying:
+                            log.warning(
+                                "Git checkout failed for %s @ %s; retrying once",
+                                cache_path,
+                                base_commit,
+                            )
+                            _remove_cache()
+                            return _try_clone_or_fetch(retrying=True)
+                        self._last_repo_error = message
+                        log.warning(message)
+                        return None
+            except subprocess.TimeoutExpired as exc:
+                message = (
+                    f"Git operation timed out for {clone_url} at cache {cache_path}"
+                    f"{f' (commit {base_commit})' if base_commit else ''}"
                 )
-            else:
-                subprocess.run(
-                    ["git", "clone", clone_url, str(cache_path)],
-                    capture_output=True,
-                    timeout=120,
-                    check=True,
-                )
-            if base_commit:
-                subprocess.run(
-                    ["git", "-C", str(cache_path), "checkout", base_commit],
-                    capture_output=True,
-                    timeout=60,
-                    check=True,
-                )
-        except subprocess.CalledProcessError as exc:
-            msg = ""
-            if hasattr(exc, "stderr") and exc.stderr:
-                msg = exc.stderr.decode(errors="replace")[:200]
-            log.warning("Git clone/fetch failed: %s", msg)
-            return None
-        except subprocess.TimeoutExpired:
-            log.warning("Git clone/fetch timed out")
+                if not retrying:
+                    cmd = getattr(exc, "cmd", ["?"])
+                    op = cmd[1] if len(cmd) > 1 else "operation"
+                    log.warning("Git %s timed out for %s; retrying once", op, cache_path)
+                    _remove_cache()
+                    return _try_clone_or_fetch(retrying=True)
+                self._last_repo_error = message
+                log.warning("%s after retry", message)
+                return None
+            return cache_path
+
+        cache = _try_clone_or_fetch()
+        if cache is None:
             return None
 
         dest = Path(tempfile.mkdtemp(prefix="llm_agent_repo_"))
@@ -172,7 +279,6 @@ class RepoContextExecutor:
             ".git", "__pycache__", "*.pyc", ".pytest_cache", "node_modules"
         )
         shutil.copytree(cache_path, dest / "project", ignore=ignore)
-
         return dest / "project"
 
     @staticmethod
@@ -275,20 +381,33 @@ class RepoContextExecutor:
                 ]
             )
 
+        # Resolve timeout: per-case metadata overrides constructor value
+        effective_timeout: int = 120
+        meta_timeout = metadata.get("repo_pytest_timeout") or metadata.get("pytest_timeout")
+        if meta_timeout is not None:
+            try:
+                effective_timeout = int(meta_timeout)
+                if effective_timeout <= 0:
+                    effective_timeout = 120
+            except (ValueError, TypeError):
+                effective_timeout = self._pytest_timeout or 120
+        else:
+            effective_timeout = self._pytest_timeout or 120
+
         try:
             proc = subprocess.run(
                 cmd,
                 cwd=str(repo_root),
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=effective_timeout,
             )
         except subprocess.TimeoutExpired:
             return ExecutionResult(
                 success=False,
                 exit_code=-1,
                 error_type="infrastructure_error",
-                error_message="pytest timed out after 300s",
+                error_message=f"pytest timed out after {effective_timeout}s",
                 tests_run=0,
                 tests_passed=0,
                 tests_failed=0,
@@ -347,6 +466,6 @@ class RepoContextExecutor:
             coverage_gaps=self._parser._parse_coverage_gaps(stdout),
             branch_coverage=branch_cov,
             coverage_data=coverage_data,
-            repo_setup_pass=True,
+            repo_setup_pass=None,
             infrastructure_pass=True,
         )

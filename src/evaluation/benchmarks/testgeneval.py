@@ -33,6 +33,36 @@ _METADATA_KEYS = (
 )
 
 
+def _infer_import_module(code_file: object) -> Optional[str]:
+    """Infer the Python import module path from a code_file path.
+
+    Examples:
+        django/db/models/base.py   -> django.db.models.base
+        sklearn/preprocessing/_label.py -> sklearn.preprocessing._label
+        src/mypkg/core.py           -> mypkg.core
+        pkg/__init__.py            -> pkg
+    """
+    if not isinstance(code_file, str) or not code_file.strip():
+        return None
+
+    path = code_file.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    if path.startswith("src/"):
+        path = path[len("src/") :]
+    if not path.endswith(".py"):
+        return None
+
+    path = path[:-3]
+    if path.endswith("/__init__"):
+        path = path[: -len("/__init__")]
+
+    module = ".".join(part for part in path.split("/") if part)
+    if not module or module.startswith("."):
+        return None
+    return module
+
+
 class TestGenEvalDataset:
     """Loads the TestGenEval benchmark from Hugging Face datasets."""
 
@@ -97,13 +127,24 @@ class TestGenEvalDataset:
             metadata["test_file"] = metadata.get("test_file") or row_dict.get("test_file")
             metadata["base_commit"] = metadata.get("base_commit") or row_dict.get("base_commit")
 
+            import_module = _infer_import_module(metadata.get("code_file"))
+            if import_module:
+                metadata["import_module"] = import_module
+
             # Build a stable case id.
             instance_id = metadata.get("instance_id")
             case_id = f"{self._name}-{instance_id}" if instance_id else f"{self._name}-{i}"
 
+            code_file = metadata.get("code_file", "unknown")
+            import_hint = (
+                f" Import from the real repo module `{import_module}`, not source_module."
+                if import_module
+                else ""
+            )
             user_request = (
                 f"Generate comprehensive pytest unit tests for the provided code file "
-                f"({metadata.get('code_file', 'unknown')})."
+                f"({code_file})."
+                f"{import_hint}"
             )
 
             cases.append(

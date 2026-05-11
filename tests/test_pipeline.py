@@ -1,5 +1,7 @@
 """Tests for the LLM Agent Platform pipeline components."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from src.agents.router import Language, RouterAgent, TaskType
@@ -119,6 +121,20 @@ def add(a, b):
 class TestUnitTestAgentParsing:
     """Tests for UnitTestAgent parsing methods."""
 
+    class CapturingLLM:
+        def __init__(self):
+            self.messages = None
+
+        def invoke(self, messages):
+            self.messages = messages
+            return SimpleNamespace(
+                content=(
+                    "from django.db.models.base import Model\n\n"
+                    "def test_model_importable():\n"
+                    "    assert Model is not None\n"
+                )
+            )
+
     def test_extract_test_functions(self):
         code = """
 def test_add_positive():
@@ -179,6 +195,24 @@ These tests cover the basic functionality.
         assert "def test_example" in result
         assert "Here are the tests" not in result
 
+    def test_generation_prompt_includes_repo_import_module(self):
+        llm = self.CapturingLLM()
+        agent = UnitTestAgent(llm)
+
+        agent.generate("class Model:\n    pass\n", import_module="django.db.models.base")
+
+        prompt = llm.messages[-1].content
+        assert "Repo-context import module: django.db.models.base" in prompt
+        assert "from django.db.models.base import <target>" in prompt
+        assert "Do NOT import from source_module in repo-context runs" in prompt
+
+    def test_generation_context_preserves_file_path_module_hint(self):
+        agent = UnitTestAgent.__new__(UnitTestAgent)
+
+        context = agent._build_context_section(file_path="source_module.py")
+
+        assert "Module to import: source_module" in context
+
 
 class TestRepairContext:
     """Tests for RepairContext model."""
@@ -204,6 +238,32 @@ class TestRepairContext:
         )
         assert context.coverage_gaps == "12, 15-18, 23"
         assert context.diagnostics is not None
+
+    def test_repair_context_with_import_module(self):
+        context = RepairContext(
+            previous_code="def test(): pass",
+            error_type="import_error",
+            error_message="No module named source_module",
+            import_module="sklearn.preprocessing._label",
+        )
+        assert context.import_module == "sklearn.preprocessing._label"
+
+    def test_repair_prompt_includes_repo_import_module(self):
+        llm = TestUnitTestAgentParsing.CapturingLLM()
+        agent = UnitTestAgent(llm)
+        context = RepairContext(
+            previous_code="from source_module import LabelEncoder\n",
+            error_type="import_error",
+            error_message="No module named source_module",
+            import_module="sklearn.preprocessing._label",
+        )
+
+        agent.repair(context)
+
+        prompt = llm.messages[-1].content
+        assert "Import from: sklearn.preprocessing._label" in prompt
+        assert "Do NOT use source_module in repo-context repairs" in prompt
+        assert "from sklearn.preprocessing._label import <target>" in prompt
 
 
 class TestIntegration:

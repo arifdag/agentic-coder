@@ -11,7 +11,12 @@ import pytest
 from src.config import EvalConfig
 from src.evaluation.benchmarks import get_dataset
 from src.evaluation.benchmarks.quixbugs import QuixBugsDataset
-from src.evaluation.benchmarks.testgeneval import TestGenEvalDataset as _TestGenEvalDataset
+from src.evaluation.benchmarks.testgeneval import (
+    TestGenEvalDataset as _TestGenEvalDataset,
+)
+from src.evaluation.benchmarks.testgeneval import (
+    _infer_import_module,
+)
 from src.evaluation.models import BenchmarkCase, EvalMetrics, EvalResult
 from src.evaluation.runner import BenchmarkRunner
 
@@ -43,7 +48,21 @@ def test_testgeneval_loader_extracts_code_and_metadata(monkeypatch, tmp_path):
     assert cases[0].language == "python"
     assert cases[0].metadata["repo"] == "django/django"
     assert cases[0].metadata["dataset_id"] == "kjain14/testgenevallite"
+    assert cases[0].metadata["import_module"] == "django.example"
+    assert "django.example" in (cases[0].user_request or "")
+    assert "source_module" in (cases[0].user_request or "")
     assert "test_human_reference" not in (cases[0].user_request or "")
+
+
+def test_testgeneval_infers_import_modules_from_code_file():
+    assert _infer_import_module("django/db/models/base.py") == "django.db.models.base"
+    assert _infer_import_module("sklearn/preprocessing/_label.py") == (
+        "sklearn.preprocessing._label"
+    )
+    assert _infer_import_module("src/mypkg/core.py") == "mypkg.core"
+    assert _infer_import_module("pkg/__init__.py") == "pkg"
+    assert _infer_import_module(r"src\mypkg\core.py") == "mypkg.core"
+    assert _infer_import_module("README.md") is None
 
 
 def test_quixbugs_loader_pairs_fixed_and_buggy_sources(tmp_path):

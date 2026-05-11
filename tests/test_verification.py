@@ -1,5 +1,7 @@
 """Tests for the Phase 2 verification layer."""
 
+import subprocess
+
 from src.verification.dependency import DependencyValidator, extract_imports
 from src.verification.models import Finding, GateResult, JudgeVerdict, Severity, VerificationReport
 from src.verification.relevance import RelevanceValidator
@@ -369,6 +371,237 @@ class TestRepoContextExecutor:
         assert result.infrastructure_pass is True
         if result.coverage_data is not None:
             assert "files" in result.coverage_data
+
+    def test_pytest_timeout_from_metadata(self, tmp_path):
+        project = tmp_path / "project"
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        test_code = (
+            "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+        )
+
+        executor = RepoContextExecutor(repo_setup="off", pytest_timeout=30)
+        result = executor.execute(
+            source_code="",
+            test_code=test_code,
+            metadata={
+                "project_root": str(project),
+                "target_file": "mypkg/core.py",
+                "repo_pytest_timeout": 600,
+            },
+        )
+        assert result.success is True
+
+    def test_pytest_timeout_falls_back_to_config(self, tmp_path):
+        project = tmp_path / "project"
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        test_code = (
+            "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+        )
+
+        executor = RepoContextExecutor(repo_setup="off", pytest_timeout=45)
+        result = executor.execute(
+            source_code="",
+            test_code=test_code,
+            metadata={
+                "project_root": str(project),
+                "target_file": "mypkg/core.py",
+            },
+        )
+        assert result.success is True
+
+    def test_timeout_message_shows_actual_timeout(self, tmp_path, monkeypatch):
+        """Timeout message must mention the actual timeout used, not a hard-coded 300s."""
+        project = tmp_path / "project"
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        test_code = (
+            "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+        )
+
+        def _slow_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0] if args else ["pytest"], timeout=kwargs.get("timeout", 0)
+            )
+
+        monkeypatch.setattr(subprocess, "run", _slow_run)
+        executor = RepoContextExecutor(repo_setup="off", pytest_timeout=77)
+        result = executor.execute(
+            source_code="",
+            test_code=test_code,
+            metadata={
+                "project_root": str(project),
+                "target_file": "mypkg/core.py",
+            },
+        )
+        assert result.error_type == "infrastructure_error"
+        assert "77s" in result.error_message
+
+    def test_repo_setup_prepare_blocks_on_failure(self, tmp_path, monkeypatch):
+        """repo_setup=prepare must return infrastructure_error and not run pytest."""
+        project = tmp_path / "project"
+        project.mkdir(parents=True)
+        (project / "setup.py").write_text(
+            "from setuptools import setup\nsetup()\n", encoding="utf-8"
+        )
+
+        def _failing_pip(*args, **kwargs):
+            class _P:
+                returncode = 1
+                stderr = b"mock pip failure"
+
+            return _P()
+
+        monkeypatch.setattr(subprocess, "run", _failing_pip)
+        executor = RepoContextExecutor(repo_setup="prepare")
+        result = executor.execute(
+            source_code="",
+            test_code="def test_x(): assert 1\n",
+            metadata={"project_root": str(project)},
+        )
+        assert result.error_type == "infrastructure_error"
+        assert result.repo_setup_pass is False
+        assert result.infrastructure_pass is False
+
+    def test_repo_setup_auto_records_failure_but_runs_pytest(self, tmp_path, monkeypatch):
+        """repo_setup=auto must record setup failure but still run tests."""
+        project = tmp_path / "project"
+        project.mkdir(parents=True)
+        (project / "setup.py").write_text(
+            "from setuptools import setup\nsetup()\n", encoding="utf-8"
+        )
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        calls = []
+
+        def _pip_then_pytest(*args, **kwargs):
+            cmd = args[0] if args else []
+            calls.append(cmd)
+
+            class _P:
+                returncode = 0
+                stderr = b""
+                stdout = b""
+
+            # First call is pip install -e . (fails)
+            if any("pip" in str(c) for c in cmd):
+                _P.returncode = 1
+                _P.stderr = b"mock pip failure"
+            return _P()
+
+        monkeypatch.setattr(subprocess, "run", _pip_then_pytest)
+        executor = RepoContextExecutor(repo_setup="auto")
+        result = executor.execute(
+            source_code="",
+            test_code=(
+                "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+            ),
+            metadata={"project_root": str(project)},
+        )
+        assert result.repo_setup_pass is False
+        # Because pip failed, pytest may still have been attempted.
+        # In the current implementation, auto still runs pytest after setup failure.
+        # Verify pytest was indeed called.
+        pytest_calls = [c for c in calls if any("pytest" in str(x) for x in c)]
+        assert len(pytest_calls) > 0
+
+    def test_repo_setup_off_skips_setup(self, tmp_path):
+        """repo_setup=off must skip setup and not mark it as failure."""
+        project = tmp_path / "project"
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        executor = RepoContextExecutor(repo_setup="off")
+        result = executor.execute(
+            source_code="",
+            test_code=(
+                "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+            ),
+            metadata={"project_root": str(project)},
+        )
+        assert result.success is True
+        assert result.repo_setup_pass is None
+
+    def test_git_fetch_failure_retries_once(self, tmp_path, monkeypatch):
+        """Cache corruption should trigger one retry after deleting the cache."""
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir(parents=True)
+        cache = cache_root / "https___github.com_example_repo"
+        cache.mkdir(parents=True)
+        (cache / ".git").mkdir()
+        (cache / "marker.txt").write_text("old", encoding="utf-8")
+
+        calls = []
+
+        def _fake_git(*args, **kwargs):
+            cmd = args[0] if args else []
+            calls.append(cmd)
+
+            class _P:
+                returncode = 0
+                stderr = b""
+                stdout = b""
+
+            if "fetch" in cmd:
+                _P.returncode = 1
+                _P.stderr = b"fatal: not a git repository"
+            elif "clone" in cmd:
+                _P.returncode = 1
+                _P.stderr = b"fatal: connection refused"
+            return _P()
+
+        monkeypatch.setattr(subprocess, "run", _fake_git)
+
+        executor = RepoContextExecutor()
+        executor._repos_cache = cache_root
+        result = executor._clone_remote("https://github.com/example/repo.git", None)
+        # After first fetch fails, cache is removed and clone retried once.
+        assert any("fetch" in str(c) for c in calls)
+        assert not cache.exists()  # rmtree removed it
+        assert result is None  # clone also failed on retry
+
+    def test_clone_failure_diagnostic_includes_url_and_cache(self, tmp_path, monkeypatch):
+        """Clone failure message must include URL, cache path, and stderr tail."""
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir(parents=True)
+
+        class FakeProc:
+            returncode = 128
+            stderr = b"fatal: could not read Username"
+
+        def _fake_git(*args, **kwargs):
+            return FakeProc()
+
+        monkeypatch.setattr(subprocess, "run", _fake_git)
+
+        executor = RepoContextExecutor()
+        executor._repos_cache = cache_root
+        result = executor.execute(
+            source_code="",
+            test_code="def test_x():\n    assert True\n",
+            metadata={"repo": "https://github.com/example/repo.git", "base_commit": "abc123"},
+        )
+
+        assert result.error_type == "infrastructure_error"
+        assert "https://github.com/example/repo.git" in (result.error_message or "")
+        assert str(cache_root) in (result.error_message or "")
+        assert "abc123" in (result.error_message or "")
+        assert "fatal: could not read Username" in (result.error_message or "")
 
 
 class TestRelevanceValidator:

@@ -216,9 +216,11 @@ def create_pipeline(config: Optional[Config] = None):
                     file_path=state.get("file_path"),
                 )
             else:
+                repo_meta = state.get("repo_metadata") or {}
                 result = unit_test_agent.generate(
                     code=state["code_input"],
                     file_path=state.get("file_path"),
+                    import_module=repo_meta.get("import_module"),
                 )
         elif task_type == TaskType.UI_TEST.value:
             ui_result = ui_test_agent.generate(
@@ -441,6 +443,7 @@ def create_pipeline(config: Optional[Config] = None):
                 executor = RepoContextExecutor(
                     repo_setup=config.evaluation.repo_setup,
                     gate_policy=config.evaluation.gate_policy,
+                    pytest_timeout=config.evaluation.repo_pytest_timeout,
                 )
                 result = executor.execute(
                     source_code=source_code,
@@ -480,8 +483,6 @@ def create_pipeline(config: Optional[Config] = None):
         setup_pass = getattr(result, "repo_setup_pass", None)
         if infra_pass is None:
             infra_pass = result.error_type != "infrastructure_error"
-        if setup_pass is None:
-            setup_pass = False if result.error_type == "infrastructure_error" else None
 
         return {
             **state,
@@ -619,6 +620,7 @@ def create_pipeline(config: Optional[Config] = None):
             )
             result = ui_test_agent.repair(ctx)
         else:
+            repo_meta = state.get("repo_metadata") or {}
             ctx = RepairContext(
                 previous_code=state.get("generated_tests") or "",
                 error_type=state.get("error_type") or "unknown",
@@ -626,6 +628,7 @@ def create_pipeline(config: Optional[Config] = None):
                 line_number=None,
                 coverage_gaps=state.get("coverage_report"),
                 diagnostics=diagnostics,
+                import_module=repo_meta.get("import_module"),
             )
             if lang in JS_LANGUAGES:
                 result = jest_test_agent.repair(ctx)

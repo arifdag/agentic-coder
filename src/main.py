@@ -462,6 +462,12 @@ DEFAULT_ALL_BENCHMARKS = [
     default=None,
     help="Gate pass policy",
 )
+@click.option(
+    "--repo-timeout",
+    type=int,
+    default=None,
+    help="Pytest timeout in seconds for repo-context tests",
+)
 @click.option("--verbose", "-v", is_flag=True)
 def evaluate(
     benchmark,
@@ -472,6 +478,7 @@ def evaluate(
     execution_context,
     repo_setup,
     gate_policy,
+    repo_timeout,
     verbose,
 ):
     """Run the pipeline against a benchmark dataset."""
@@ -489,6 +496,8 @@ def evaluate(
         config.evaluation.repo_setup = repo_setup
     if gate_policy is not None:
         config.evaluation.gate_policy = gate_policy
+    if repo_timeout is not None:
+        config.evaluation.repo_pytest_timeout = repo_timeout
     results_dir = output_dir or config.evaluation.results_dir
     max_cases = max_cases or config.evaluation.max_cases
 
@@ -550,6 +559,12 @@ def evaluate(
     help="Gate pass policy",
 )
 @click.option(
+    "--repo-timeout",
+    type=int,
+    default=None,
+    help="Pytest timeout in seconds for repo-context tests",
+)
+@click.option(
     "--variants",
     type=str,
     default=None,
@@ -571,6 +586,7 @@ def ablation(
     execution_context,
     repo_setup,
     gate_policy,
+    repo_timeout,
     variants,
     verbose,
 ):
@@ -589,6 +605,8 @@ def ablation(
         config.evaluation.repo_setup = repo_setup
     if gate_policy is not None:
         config.evaluation.gate_policy = gate_policy
+    if repo_timeout is not None:
+        config.evaluation.repo_pytest_timeout = repo_timeout
     results_dir = output_dir or config.evaluation.results_dir
 
     axes_list = [a.strip() for a in axes.split(",")]

@@ -370,6 +370,7 @@ class EvalConfig(BaseModel):
     execution_context: str = Field(default="auto")
     repo_setup: str = Field(default="auto")
     gate_policy: str = Field(default="strict")
+    repo_pytest_timeout: int = Field(default=120)
 
     _EXECUTION_CONTEXTS: ClassVar[tuple[str, ...]] = ("auto", "single-file", "repo")
     _REPO_SETUPS: ClassVar[tuple[str, ...]] = ("auto", "prepare", "reuse", "off")
@@ -396,6 +397,8 @@ class EvalConfig(BaseModel):
             self.mutation_max_mutants = 0
         if self.reliability_repeats < 0:
             self.reliability_repeats = 0
+        if self.repo_pytest_timeout <= 0:
+            self.repo_pytest_timeout = 120
 
     @classmethod
     def from_env(cls) -> "EvalConfig":
@@ -411,6 +414,7 @@ class EvalConfig(BaseModel):
             execution_context=os.getenv("EVAL_EXECUTION_CONTEXT", "auto"),
             repo_setup=os.getenv("EVAL_REPO_SETUP", "auto"),
             gate_policy=os.getenv("EVAL_GATE_POLICY", "strict"),
+            repo_pytest_timeout=int(os.getenv("EVAL_REPO_PYTEST_TIMEOUT", "120")),
         )
 
 
