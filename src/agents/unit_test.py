@@ -1,7 +1,7 @@
 """Unit Test Agent for generating pytest tests."""
 
 import re
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -107,6 +107,36 @@ Requirements:
 - Include at least 3-5 test cases per public function/method.
 
 Generate the complete test file now:"""
+
+TESTGENEVAL_GENERATION_TEMPLATE = """Generate a pytest test file for an official TestGenEval evaluation case.
+
+Repository context:
+- Repository: {repo}
+- Version: {version}
+- Source file under test: {code_file}
+- Existing/target test file path: {test_file}
+- Inferred import module: {import_module}
+- Benchmark request: {user_request}
+
+Source code under test:
+```python
+{code}
+```
+
+Critical output requirements:
+- Return NON-EMPTY Python pytest code only. Do not return markdown, prose, or an empty response.
+- Define at least one pytest test function named test_* or a Test* class with test_* methods.
+- Import the real target from the repository module.
+{import_guidance}
+- If the exact symbol name is unclear, inspect the source code and import the public functions/classes it defines.
+- Do NOT import from source_module for TestGenEval official runs.
+- Do NOT redefine, shadow, copy, stub, monkeypatch away, or reimplement production targets in the test file.
+- Every test must call or instantiate the real target and include meaningful assertions or pytest.raises checks.
+- Never use dummy assertions such as assert True, assert 1 == 1, or pass-only test bodies.
+- Avoid network, sleeps, wall-clock timing, randomness without fixed seeds, or external services.
+- Keep the test file focused and deterministic.
+
+Return the complete pytest file now, with imports at the top and no surrounding explanation:"""
 
 REPAIR_TEMPLATE = """The previously generated test code failed verification.
 
@@ -262,6 +292,12 @@ class UnitTestAgent:
 
         return "\n".join(sections) if sections else ""
 
+    def _metadata_value(self, metadata: Mapping[str, Any], key: str, default: str) -> str:
+        value = metadata.get(key)
+        if value is None or value == "":
+            return default
+        return str(value)
+
     def generate(
         self,
         code: str,
@@ -283,6 +319,51 @@ class UnitTestAgent:
         prompt = GENERATION_TEMPLATE.format(
             code=code,
             context_section=context_section,
+        )
+
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
+
+        response = self.llm.invoke(messages)
+        response_text = response.content if hasattr(response, "content") else str(response)
+
+        test_code = self._extract_code_from_response(response_text)
+        test_functions = self._extract_test_functions(test_code)
+        imports = self._extract_imports(test_code)
+
+        return GeneratedTest(
+            test_code=test_code,
+            imports=imports,
+            test_functions=test_functions,
+        )
+
+    def generate_testgeneval(
+        self,
+        code: str,
+        metadata: Mapping[str, Any],
+        user_request: Optional[str] = None,
+    ) -> GeneratedTest:
+        """Generate a TestGenEval official-compatible pytest prediction."""
+        import_module = self._metadata_value(metadata, "import_module", "unknown")
+        code_file = self._metadata_value(metadata, "code_file", "unknown")
+        if import_module != "unknown":
+            import_guidance = f"- Prefer:\n  from {import_module} import <public function or class>"
+        else:
+            import_guidance = (
+                f"- Infer the importable module from source file {code_file}; "
+                "never use source_module."
+            )
+        prompt = TESTGENEVAL_GENERATION_TEMPLATE.format(
+            repo=self._metadata_value(metadata, "repo", "unknown"),
+            version=self._metadata_value(metadata, "version", "unknown"),
+            code_file=code_file,
+            test_file=self._metadata_value(metadata, "test_file", "unknown"),
+            import_module=import_module,
+            import_guidance=import_guidance,
+            user_request=user_request or "Generate pytest unit tests for the source code.",
+            code=code,
         )
 
         messages = [

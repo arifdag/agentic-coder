@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.evaluation.models import BenchmarkCase
-from src.evaluation.testgeneval_official import run_official_bridge
+from src.evaluation.testgeneval_official import run_official_bridge, validate_official_prediction
 
 
 def _official_repo(tmp_path):
@@ -40,6 +40,14 @@ def _case(case_id: str = "testgeneval_lite-django__django-1") -> BenchmarkCase:
     )
 
 
+def _valid_prediction() -> str:
+    return (
+        "from django.example import target\n\n"
+        "def test_target_returns_one():\n"
+        "    assert target() == 1\n"
+    )
+
+
 def test_official_bridge_writes_prediction_jsonl_and_manifest(monkeypatch, tmp_path):
     calls: list[list[str]] = []
 
@@ -65,7 +73,7 @@ def test_official_bridge_writes_prediction_jsonl_and_manifest(monkeypatch, tmp_p
         output_dir=tmp_path / "out",
         model_name="llm-agent-gdr",
         official_repo_dir=_official_repo(tmp_path),
-        generate=lambda case: "from django.example import target\n\ndef test_target():\n    assert target() == 1\n",
+        generate=lambda case: _valid_prediction(),
     )
 
     records = [
@@ -80,7 +88,7 @@ def test_official_bridge_writes_prediction_jsonl_and_manifest(monkeypatch, tmp_p
             "preds": {
                 "full": [
                     "from django.example import target\n\n"
-                    "def test_target():\n"
+                    "def test_target_returns_one():\n"
                     "    assert target() == 1\n"
                 ]
             },
@@ -126,7 +134,7 @@ def test_official_bridge_requires_official_scripts(tmp_path):
             output_dir=tmp_path / "out",
             model_name="llm-agent-gdr",
             official_repo_dir=tmp_path,
-            generate=lambda case: "def test_target():\n    assert True\n",
+            generate=lambda case: _valid_prediction(),
         )
 
 
@@ -150,7 +158,7 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
         num_processes=2,
         skip_mutation=True,
         skip_existing=True,
-        generate=lambda case: "def test_target():\n    assert True\n",
+        generate=lambda case: _valid_prediction(),
     )
 
     eval_cmd = calls[0]
@@ -230,7 +238,7 @@ def test_official_bridge_uses_fallback_when_report_cli_fails(monkeypatch, tmp_pa
         output_dir=tmp_path / "out",
         model_name="llm-agent-gdr",
         official_repo_dir=_official_repo(tmp_path),
-        generate=lambda case: "def test_target():\n    assert True\n",
+        generate=lambda case: _valid_prediction(),
     )
 
     assert result.returncodes == [0, 1]
@@ -238,3 +246,33 @@ def test_official_bridge_uses_fallback_when_report_cli_fails(monkeypatch, tmp_pa
     assert result.counts["report_fallback_used"] is True
     assert result.summary_copied is not None
     assert result.report_copied is not None
+
+
+def test_validate_official_prediction_rejects_unusable_outputs():
+    with pytest.raises(ValueError, match="empty"):
+        validate_official_prediction("   ")
+    with pytest.raises(ValueError, match="valid Python"):
+        validate_official_prediction("Here are the tests you requested.")
+    with pytest.raises(ValueError, match="pytest test"):
+        validate_official_prediction("from django.example import target\n")
+    with pytest.raises(ValueError, match="dummy assertions"):
+        validate_official_prediction("def test_placeholder():\n    assert True\n")
+
+
+def test_official_bridge_rejects_empty_generation_and_skips_eval(tmp_path):
+    result = run_official_bridge(
+        benchmark="testgeneval_lite",
+        cases=[_case()],
+        output_dir=tmp_path / "out",
+        model_name="llm-agent-gdr",
+        official_repo_dir=_official_repo(tmp_path),
+        generate=lambda case: "",
+    )
+
+    assert result.predictions_path.read_text(encoding="utf-8") == ""
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest[0]["status"] == "failed"
+    assert "empty" in manifest[0]["error"]
+    assert result.counts == {"written": 0, "failed": 1, "total_attempted": 1}
+    assert result.commands_run == []
+    assert "No predictions were written" in result.errors[0]

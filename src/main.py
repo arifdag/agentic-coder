@@ -611,9 +611,10 @@ def testgeneval_official(
     def generate_case(case):
         if verbose:
             console.print(f"[dim]Generating official prediction for {case.id}[/dim]")
-        generated = agent.generate(
+        generated = agent.generate_testgeneval(
             code=case.code,
-            import_module=case.metadata.get("import_module"),
+            metadata=case.metadata,
+            user_request=case.user_request,
         )
         return generated.test_code
 

@@ -6,6 +6,7 @@ TestGenEval evaluation/report scripts as subprocesses.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import subprocess
@@ -89,6 +90,72 @@ def _validate_official_repo(official_repo_dir: Path) -> None:
         )
 
 
+def _is_pytest_raises_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "raises"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pytest"
+    )
+
+
+def _is_dummy_assert(node: ast.Assert) -> bool:
+    test = node.test
+    if isinstance(test, ast.Constant):
+        return test.value is True
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and len(test.comparators) == 1:
+        left = test.left
+        right = test.comparators[0]
+        if isinstance(left, ast.Constant) and isinstance(right, ast.Constant):
+            return left.value == right.value
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return isinstance(test.operand, ast.Constant) and test.operand.value is False
+    return False
+
+
+def validate_official_prediction(test_code: str) -> str:
+    """Reject unusable official TestGenEval predictions before Docker scoring."""
+    if not isinstance(test_code, str):
+        raise TypeError(f"Generator returned {type(test_code)}, expected str")
+
+    cleaned = test_code.strip()
+    if not cleaned:
+        raise ValueError("Generated test code is empty")
+
+    try:
+        tree = ast.parse(cleaned)
+    except SyntaxError as exc:
+        raise ValueError(f"Generated test code is not valid Python: {exc.msg}") from exc
+
+    has_pytest_test = any(
+        (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        )
+        or (isinstance(node, ast.ClassDef) and node.name.startswith("Test"))
+        for node in ast.walk(tree)
+    )
+    if not has_pytest_test:
+        raise ValueError("Generated test code must define at least one pytest test")
+
+    assert_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+    has_meaningful_assert = any(not _is_dummy_assert(node) for node in assert_nodes)
+    has_pytest_raises = any(
+        any(_is_pytest_raises_call(item.context_expr) for item in node.items)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+    )
+    if not has_meaningful_assert and not has_pytest_raises:
+        if assert_nodes:
+            raise ValueError("Generated test code contains only dummy assertions")
+        raise ValueError("Generated test code must contain meaningful assertions")
+
+    return cleaned + "\n"
+
+
 def _write_predictions_jsonl(
     predictions_path: Path,
     tasks_path: Path,
@@ -96,6 +163,7 @@ def _write_predictions_jsonl(
     model_name: str,
     generate: Callable[[BenchmarkCase], str],
     max_cases: Optional[int] = None,
+    validate: Optional[Callable[[str], str]] = validate_official_prediction,
 ) -> tuple[int, int, List[dict]]:
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,8 +192,8 @@ def _write_predictions_jsonl(
             }
             try:
                 test_code = generate(case)
-                if not isinstance(test_code, str):
-                    raise TypeError(f"Generator returned {type(test_code)}, expected str")
+                if validate is not None:
+                    test_code = validate(test_code)
                 record = {
                     "id": official_id,
                     "instance_id": instance_id,
@@ -415,6 +483,7 @@ def run_official_bridge(
     skip_existing: bool = True,
     max_cases: Optional[int] = None,
     generate: Callable[[BenchmarkCase], str],
+    validate_prediction: Optional[Callable[[str], str]] = validate_official_prediction,
 ) -> OfficialBridgeResult:
     """Run the official TestGenEval bridge.
 
@@ -432,6 +501,8 @@ def run_official_bridge(
         max_cases: Optional cap on the number of cases to process.
         generate: Callable that receives a ``BenchmarkCase`` and returns the
             generated test code as a ``str``.
+        validate_prediction: Optional generated-test validator. Defaults to
+            rejecting empty, non-Python, no-test, and dummy-only predictions.
 
     Returns:
         ``OfficialBridgeResult`` with paths, counts, commands, return codes,
@@ -470,7 +541,13 @@ def run_official_bridge(
 
     # Generate predictions
     written, failed, manifest = _write_predictions_jsonl(
-        predictions_path, tasks_path, cases, model_name, generate, max_cases
+        predictions_path,
+        tasks_path,
+        cases,
+        model_name,
+        generate,
+        max_cases,
+        validate_prediction,
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     result.counts = {

@@ -206,6 +206,31 @@ These tests cover the basic functionality.
         assert "from django.db.models.base import <target>" in prompt
         assert "Do NOT import from source_module in repo-context runs" in prompt
 
+    def test_testgeneval_prompt_includes_official_context(self):
+        llm = self.CapturingLLM()
+        agent = UnitTestAgent(llm)
+
+        result = agent.generate_testgeneval(
+            code="class Model:\n    pass\n",
+            metadata={
+                "repo": "django/django",
+                "version": "5.0",
+                "code_file": "django/db/models/base.py",
+                "test_file": "tests/model_tests/test_base.py",
+                "import_module": "django.db.models.base",
+            },
+            user_request="Generate comprehensive pytest tests.",
+        )
+
+        prompt = llm.messages[-1].content
+        assert "official TestGenEval evaluation case" in prompt
+        assert "Repository: django/django" in prompt
+        assert "Source file under test: django/db/models/base.py" in prompt
+        assert "Existing/target test file path: tests/model_tests/test_base.py" in prompt
+        assert "from django.db.models.base import <public function or class>" in prompt
+        assert "Do NOT import from source_module for TestGenEval official runs" in prompt
+        assert result.test_functions == ["test_model_importable"]
+
     def test_generation_context_preserves_file_path_module_hint(self):
         agent = UnitTestAgent.__new__(UnitTestAgent)
 
