@@ -125,7 +125,10 @@ Source code under test:
 
 Critical output requirements:
 - Return NON-EMPTY Python pytest code only. Do not return markdown, prose, or an empty response.
-- Define at least one pytest test function named test_* or a Test* class with test_* methods.
+- Define file-level pytest test functions named test_*.
+- Do NOT define test classes, including Test* classes. The official TestGenEval
+  postprocessor extracts file-level functions most reliably, and class-based
+  output can break Django postprocessing.
 - Import the real target from the repository module.
 {import_guidance}
 - If the exact symbol name is unclear, inspect the source code and import the public functions/classes it defines.
@@ -133,6 +136,7 @@ Critical output requirements:
 - Do NOT redefine, shadow, copy, stub, monkeypatch away, or reimplement production targets in the test file.
 - Every test must call or instantiate the real target and include meaningful assertions or pytest.raises checks.
 - Never use dummy assertions such as assert True, assert 1 == 1, or pass-only test bodies.
+- Prefer a compact set of 3-8 focused tests over a huge broad test file.
 - Avoid network, sleeps, wall-clock timing, randomness without fixed seeds, or external services.
 - Keep the test file focused and deterministic.
 

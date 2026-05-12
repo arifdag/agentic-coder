@@ -130,16 +130,23 @@ def validate_official_prediction(test_code: str) -> str:
     except SyntaxError as exc:
         raise ValueError(f"Generated test code is not valid Python: {exc.msg}") from exc
 
-    has_pytest_test = any(
-        (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name.startswith("test_")
-        )
-        or (isinstance(node, ast.ClassDef) and node.name.startswith("Test"))
+    class_tests = [
+        node.name
         for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test")
+    ]
+    if class_tests:
+        raise ValueError(
+            "Generated TestGenEval full-mode code must use file-level test_* "
+            f"functions, not test classes: {', '.join(class_tests)}"
+        )
+
+    has_pytest_test = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+        for node in tree.body
     )
     if not has_pytest_test:
-        raise ValueError("Generated test code must define at least one pytest test")
+        raise ValueError("Generated test code must define at least one file-level pytest test")
 
     assert_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
     has_meaningful_assert = any(not _is_dummy_assert(node) for node in assert_nodes)

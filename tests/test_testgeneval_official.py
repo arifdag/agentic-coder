@@ -257,6 +257,12 @@ def test_validate_official_prediction_rejects_unusable_outputs():
         validate_official_prediction("from django.example import target\n")
     with pytest.raises(ValueError, match="dummy assertions"):
         validate_official_prediction("def test_placeholder():\n    assert True\n")
+    with pytest.raises(ValueError, match="not test classes"):
+        validate_official_prediction(
+            "class TestTarget:\n"
+            "    def test_target_returns_one(self):\n"
+            "        assert target() == 1\n"
+        )
 
 
 def test_official_bridge_rejects_empty_generation_and_skips_eval(tmp_path):

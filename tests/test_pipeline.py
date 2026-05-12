@@ -229,6 +229,8 @@ These tests cover the basic functionality.
         assert "Existing/target test file path: tests/model_tests/test_base.py" in prompt
         assert "from django.db.models.base import <public function or class>" in prompt
         assert "Do NOT import from source_module for TestGenEval official runs" in prompt
+        assert "Do NOT define test classes" in prompt
+        assert "file-level pytest test functions named test_*" in prompt
         assert result.test_functions == ["test_model_importable"]
 
     def test_generation_context_preserves_file_path_module_hint(self):
