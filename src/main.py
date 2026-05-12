@@ -18,7 +18,10 @@ console = Console()
 
 def _generate_official_testgeneval_prediction(agent, case, max_attempts: int = 3) -> str:
     """Generate and locally validate an official TestGenEval prediction."""
-    from .evaluation.testgeneval_official import validate_official_prediction
+    from .evaluation.testgeneval_official import (
+        validate_official_prediction,
+        wrap_django_official_prediction,
+    )
 
     feedback = None
     last_error = None
@@ -30,7 +33,10 @@ def _generate_official_testgeneval_prediction(agent, case, max_attempts: int = 3
             feedback=feedback,
         )
         try:
-            return validate_official_prediction(generated.test_code)
+            test_code = validate_official_prediction(generated.test_code)
+            if case.metadata.get("repo") == "django/django":
+                test_code = wrap_django_official_prediction(test_code)
+            return test_code
         except (TypeError, ValueError) as exc:
             last_error = exc
             feedback = str(exc)
@@ -605,7 +611,7 @@ def testgeneval_official(
     from .agents.unit_test import UnitTestAgent
     from .config import Config, get_role_llm
     from .evaluation.benchmarks import get_dataset
-    from .evaluation.testgeneval_official import run_official_bridge
+    from .evaluation.testgeneval_official import run_official_bridge, validate_official_prediction
 
     config = Config.load(provider=provider)
     config.pipeline.verbose = verbose
@@ -653,6 +659,10 @@ def testgeneval_official(
             skip_existing=not no_skip_existing,
             max_cases=max_cases,
             generate=generate_case,
+            validate_prediction=lambda code: validate_official_prediction(
+                code,
+                allow_test_classes=True,
+            ),
         )
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[red]Official TestGenEval setup error:[/red] {exc}")

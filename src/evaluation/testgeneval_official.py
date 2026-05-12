@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -116,7 +117,25 @@ def _is_dummy_assert(node: ast.Assert) -> bool:
     return False
 
 
-def validate_official_prediction(test_code: str) -> str:
+def _is_testcase_subclass(node: ast.ClassDef) -> bool:
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id in {"SimpleTestCase", "TestCase"}:
+            return True
+        if isinstance(base, ast.Attribute) and base.attr in {"SimpleTestCase", "TestCase"}:
+            return True
+    return False
+
+
+def _test_method_names(node: ast.ClassDef) -> list[str]:
+    return [
+        item.name
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name.startswith("test_")
+    ]
+
+
+def validate_official_prediction(test_code: str, *, allow_test_classes: bool = False) -> str:
     """Reject unusable official TestGenEval predictions before Docker scoring."""
     if not isinstance(test_code, str):
         raise TypeError(f"Generator returned {type(test_code)}, expected str")
@@ -142,22 +161,32 @@ def validate_official_prediction(test_code: str) -> str:
             "official repo containers may run with unittest only"
         )
 
-    class_tests = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef) and node.name.startswith("Test")
-    ]
+    class_tests = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
     if class_tests:
-        raise ValueError(
-            "Generated TestGenEval full-mode code must use file-level test_* "
-            f"functions, not test classes: {', '.join(class_tests)}"
-        )
+        named_test_classes = [node.name for node in class_tests if node.name.startswith("Test")]
+        if named_test_classes and not allow_test_classes:
+            raise ValueError(
+                "Generated TestGenEval full-mode code must use file-level test_* "
+                f"functions, not test classes: {', '.join(named_test_classes)}"
+            )
+        if allow_test_classes:
+            invalid_classes = [
+                node.name
+                for node in class_tests
+                if _test_method_names(node) and not _is_testcase_subclass(node)
+            ]
+            if invalid_classes:
+                raise ValueError(
+                    "Generated TestGenEval class-based tests must inherit from "
+                    f"SimpleTestCase or TestCase: {', '.join(invalid_classes)}"
+                )
 
     has_pytest_test = any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
         for node in tree.body
     )
-    if not has_pytest_test:
+    has_class_test = allow_test_classes and any(_test_method_names(node) for node in class_tests)
+    if not has_pytest_test and not has_class_test:
         raise ValueError("Generated test code must define at least one file-level pytest test")
 
     assert_nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Assert)]
@@ -173,6 +202,83 @@ def validate_official_prediction(test_code: str) -> str:
         raise ValueError("Generated test code must contain meaningful assertions")
 
     return cleaned + "\n"
+
+
+def _function_source(lines: list[str], node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    start = node.lineno
+    if node.decorator_list:
+        start = min(decorator.lineno for decorator in node.decorator_list)
+    return lines[start - 1 : node.end_lineno]
+
+
+def _add_self_to_function_header(line: str) -> str:
+    pattern = re.compile(r"^(\s*(?:async\s+def|def)\s+\w+\s*)\(([^)]*)\)(\s*(?:->[^:]+)?\s*:.*)$")
+    match = pattern.match(line)
+    if not match:
+        return line
+    args = match.group(2).strip()
+    if args.startswith("self"):
+        return line
+    replacement_args = f"self, {args}" if args else "self"
+    return f"{match.group(1)}({replacement_args}){match.group(3)}"
+
+
+def wrap_django_official_prediction(test_code: str) -> str:
+    """Wrap file-level TestGenEval Django tests in a SimpleTestCase class."""
+    cleaned = validate_official_prediction(test_code)
+    tree = ast.parse(cleaned)
+    test_functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    if not test_functions:
+        return cleaned
+
+    lines = cleaned.splitlines()
+    removed_lines: set[int] = set()
+    method_blocks: list[list[str]] = []
+    for node in test_functions:
+        block = _function_source(lines, node)
+        for i in range(
+            (
+                min(decorator.lineno for decorator in node.decorator_list)
+                if node.decorator_list
+                else node.lineno
+            ),
+            node.end_lineno + 1,
+        ):
+            removed_lines.add(i)
+
+        method_block = []
+        header_rewritten = False
+        for line in block:
+            stripped = line.lstrip()
+            if not header_rewritten and (
+                stripped.startswith("def ") or stripped.startswith("async def ")
+            ):
+                line = _add_self_to_function_header(line)
+                header_rewritten = True
+            method_block.append("    " + line)
+        method_blocks.append(method_block)
+
+    preamble_lines = [
+        line.rstrip() for i, line in enumerate(lines, start=1) if i not in removed_lines
+    ]
+    while preamble_lines and not preamble_lines[-1].strip():
+        preamble_lines.pop()
+
+    has_simple_testcase = any("SimpleTestCase" in line for line in preamble_lines)
+    if not has_simple_testcase:
+        preamble_lines.insert(0, "from django.test import SimpleTestCase")
+
+    class_lines = ["", "", "class TestsHarness(SimpleTestCase):"]
+    for block in method_blocks:
+        class_lines.extend(["", *block])
+
+    wrapped = "\n".join(preamble_lines + class_lines).strip() + "\n"
+    return validate_official_prediction(wrapped, allow_test_classes=True)
 
 
 def _write_predictions_jsonl(

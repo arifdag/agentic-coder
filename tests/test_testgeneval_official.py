@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.evaluation.models import BenchmarkCase
-from src.evaluation.testgeneval_official import run_official_bridge, validate_official_prediction
+from src.evaluation.testgeneval_official import (
+    run_official_bridge,
+    validate_official_prediction,
+    wrap_django_official_prediction,
+)
 from src.main import _generate_official_testgeneval_prediction
 
 
@@ -304,9 +308,37 @@ def test_official_generation_retries_with_validation_feedback():
 
     agent = FakeAgent()
 
-    result = _generate_official_testgeneval_prediction(agent, _case())
+    case = _case()
+    case.metadata["repo"] = "example/project"
+
+    result = _generate_official_testgeneval_prediction(agent, case)
 
     assert result == _valid_prediction()
     assert len(agent.calls) == 2
     assert agent.calls[0]["feedback"] is None
     assert agent.calls[1]["feedback"] == "Generated test code is empty"
+
+
+def test_django_official_prediction_wraps_functions_in_simple_testcase():
+    wrapped = wrap_django_official_prediction(
+        "from django.db.migrations.serializer import BaseSerializer\n\n"
+        "def test_base_serializer_raises():\n"
+        "    try:\n"
+        "        BaseSerializer(1).serialize()\n"
+        "    except NotImplementedError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise AssertionError('expected error')\n\n"
+        "def test_nested_helper_class():\n"
+        "    class Helper:\n"
+        "        def method(self):\n"
+        "            return 1\n"
+        "    assert Helper().method() == 1\n"
+    )
+
+    assert "from django.test import SimpleTestCase" in wrapped
+    assert "class TestsHarness(SimpleTestCase):" in wrapped
+    assert "    def test_base_serializer_raises(self):" in wrapped
+    assert "    def test_nested_helper_class(self):" in wrapped
+    assert "        def method(self):" in wrapped
+    validate_official_prediction(wrapped, allow_test_classes=True)
