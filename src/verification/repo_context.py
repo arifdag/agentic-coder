@@ -31,6 +31,24 @@ def _tail(text: str, limit: int = 800) -> str:
     return "..." + text[-limit:]
 
 
+def _module_from_path(path_value: object) -> Optional[str]:
+    """Infer an importable module path from a Python file path."""
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    path = path_value.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    if path.startswith("src/"):
+        path = path[len("src/") :]
+    if not path.endswith(".py"):
+        return None
+    path = path[:-3]
+    if path.endswith("/__init__"):
+        path = path[: -len("/__init__")]
+    module = ".".join(part for part in path.split("/") if part)
+    return module or None
+
+
 class RepoContextExecutor:
     """Execute generated tests against a real project checkout or worktree."""
 
@@ -125,6 +143,13 @@ class RepoContextExecutor:
             else:  # auto
                 repo_setup_pass = setup_ok if setup_ok else False
 
+            preflight = self._preflight_target_import(temp_repo, metadata)
+            if preflight is not None:
+                preflight.repo_setup_pass = repo_setup_pass
+                if repo_setup_pass is False and setup_msg:
+                    self._attach_setup_warning(preflight, setup_msg)
+                return preflight
+
             gen_dir = temp_repo / _GENERATED_DIR
             gen_dir.mkdir(parents=True, exist_ok=True)
             test_path = gen_dir / _TEST_FILE
@@ -133,8 +158,7 @@ class RepoContextExecutor:
             result = self._run_pytest(temp_repo, test_path, metadata)
             result.repo_setup_pass = repo_setup_pass
             if repo_setup_pass is False and setup_msg:
-                setup_details = f"[repo setup warning]\n{setup_msg}\n"
-                result.stderr = f"{setup_details}\n{result.stderr or ''}"
+                self._attach_setup_warning(result, setup_msg)
             return result
 
         finally:
@@ -333,6 +357,98 @@ class RepoContextExecutor:
             return False, "; ".join(errors)
         return True, ""
 
+    def _repo_env(self, repo_root: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        path_entries = [str(repo_root), str(repo_root / "src")]
+        existing = env.get("PYTHONPATH")
+        if existing:
+            path_entries.append(existing)
+        env["PYTHONPATH"] = os.pathsep.join(path_entries)
+        return env
+
+    def _target_import_module(self, metadata: Dict[str, Any]) -> Optional[str]:
+        module = metadata.get("import_module")
+        if isinstance(module, str) and module.strip():
+            return module.strip()
+        return _module_from_path(metadata.get("target_file") or metadata.get("code_file"))
+
+    def _effective_pytest_timeout(self, metadata: Dict[str, Any]) -> int:
+        meta_timeout = metadata.get("repo_pytest_timeout") or metadata.get("pytest_timeout")
+        if meta_timeout is not None:
+            try:
+                effective_timeout = int(meta_timeout)
+                if effective_timeout > 0:
+                    return effective_timeout
+            except (ValueError, TypeError):
+                pass
+        return self._pytest_timeout or 120
+
+    def _preflight_target_import(
+        self,
+        repo_root: Path,
+        metadata: Dict[str, Any],
+    ) -> Optional[ExecutionResult]:
+        """Return an infrastructure failure if the target module cannot import."""
+        module = self._target_import_module(metadata)
+        if not module:
+            return None
+
+        cmd = [
+            sys.executable,
+            "-c",
+            "import importlib, sys; importlib.import_module(sys.argv[1])",
+            module,
+        ]
+        timeout = min(self._effective_pytest_timeout(metadata), 30)
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=self._repo_env(repo_root),
+            )
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(
+                success=False,
+                exit_code=-1,
+                error_type="infrastructure_error",
+                error_message=f"target module preflight import timed out after {timeout}s: {module}",
+                tests_run=0,
+                tests_passed=0,
+                tests_failed=0,
+                infrastructure_pass=False,
+            )
+
+        if proc.returncode == 0:
+            return None
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        details = "\n".join(part for part in (stdout, stderr) if part)
+        return ExecutionResult(
+            success=False,
+            exit_code=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            error_type="infrastructure_error",
+            error_message=(
+                "target module preflight import failed before generated tests ran: "
+                f"{module}. This usually means repo dependencies are missing or the "
+                f"checkout is unbuilt. Details: {_tail(details)}"
+            ),
+            tests_run=0,
+            tests_passed=0,
+            tests_failed=0,
+            infrastructure_pass=False,
+        )
+
+    @staticmethod
+    def _attach_setup_warning(result: ExecutionResult, setup_msg: str) -> None:
+        setup_details = f"[repo setup warning]\n{setup_msg}\n"
+        result.stderr = f"{setup_details}\n{result.stderr or ''}"
+
     def _run_pytest(
         self,
         repo_root: Path,
@@ -381,18 +497,7 @@ class RepoContextExecutor:
                 ]
             )
 
-        # Resolve timeout: per-case metadata overrides constructor value
-        effective_timeout: int = 120
-        meta_timeout = metadata.get("repo_pytest_timeout") or metadata.get("pytest_timeout")
-        if meta_timeout is not None:
-            try:
-                effective_timeout = int(meta_timeout)
-                if effective_timeout <= 0:
-                    effective_timeout = 120
-            except (ValueError, TypeError):
-                effective_timeout = self._pytest_timeout or 120
-        else:
-            effective_timeout = self._pytest_timeout or 120
+        effective_timeout = self._effective_pytest_timeout(metadata)
 
         try:
             proc = subprocess.run(
@@ -401,6 +506,7 @@ class RepoContextExecutor:
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
+                env=self._repo_env(repo_root),
             )
         except subprocess.TimeoutExpired:
             return ExecutionResult(

@@ -5,7 +5,7 @@ import subprocess
 from src.verification.dependency import DependencyValidator, extract_imports
 from src.verification.models import Finding, GateResult, JudgeVerdict, Severity, VerificationReport
 from src.verification.relevance import RelevanceValidator
-from src.verification.repo_context import RepoContextExecutor
+from src.verification.repo_context import RepoContextExecutor, _module_from_path
 from src.verification.sast import SastAnalyzer
 
 
@@ -345,6 +345,14 @@ class TestSandboxFixImports:
 class TestRepoContextExecutor:
     """Tests for executing generated tests inside a real project layout."""
 
+    def test_module_from_path_infers_repo_imports(self):
+        assert _module_from_path("django/db/migrations/serializer.py") == (
+            "django.db.migrations.serializer"
+        )
+        assert _module_from_path("src/mypkg/core.py") == "mypkg.core"
+        assert _module_from_path("pkg/__init__.py") == "pkg"
+        assert _module_from_path("README.md") is None
+
     def test_executes_generated_tests_in_local_project(self, tmp_path):
         project = tmp_path / "project"
         package = project / "mypkg"
@@ -429,12 +437,21 @@ class TestRepoContextExecutor:
             "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
         )
 
-        def _slow_run(*args, **kwargs):
+        def _preflight_then_slow_pytest(*args, **kwargs):
+            cmd = args[0] if args else []
+            if "-c" in cmd:
+
+                class _P:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+
+                return _P()
             raise subprocess.TimeoutExpired(
                 cmd=args[0] if args else ["pytest"], timeout=kwargs.get("timeout", 0)
             )
 
-        monkeypatch.setattr(subprocess, "run", _slow_run)
+        monkeypatch.setattr(subprocess, "run", _preflight_then_slow_pytest)
         executor = RepoContextExecutor(repo_setup="off", pytest_timeout=77)
         result = executor.execute(
             source_code="",
@@ -446,6 +463,61 @@ class TestRepoContextExecutor:
         )
         assert result.error_type == "infrastructure_error"
         assert "77s" in result.error_message
+
+    def test_preflight_import_failure_is_infrastructure_error(self, tmp_path):
+        """Unbuilt source checkouts should fail before generated tests are run."""
+        project = tmp_path / "project"
+        check_build = project / "sklearn" / "__check_build"
+        preprocessing = project / "sklearn" / "preprocessing"
+        check_build.mkdir(parents=True)
+        preprocessing.mkdir(parents=True)
+        (project / "sklearn" / "__init__.py").write_text(
+            "from . import __check_build\n", encoding="utf-8"
+        )
+        (check_build / "__init__.py").write_text(
+            "raise ImportError(\"No module named 'sklearn.__check_build._check_build'\\n"
+            'It seems that scikit-learn has not been built correctly.")\n',
+            encoding="utf-8",
+        )
+        (preprocessing / "__init__.py").write_text("", encoding="utf-8")
+        (preprocessing / "label.py").write_text("class LabelEncoder: pass\n", encoding="utf-8")
+
+        result = RepoContextExecutor(repo_setup="off").execute(
+            source_code="",
+            test_code="def test_should_not_run():\n    assert False\n",
+            metadata={
+                "project_root": str(project),
+                "code_file": "sklearn/preprocessing/label.py",
+                "import_module": "sklearn.preprocessing.label",
+            },
+        )
+
+        assert result.success is False
+        assert result.error_type == "infrastructure_error"
+        assert result.infrastructure_pass is False
+        assert result.repo_setup_pass is None
+        assert result.tests_run == 0
+        assert "preflight import failed" in (result.error_message or "")
+        assert "sklearn.__check_build._check_build" in (result.error_message or "")
+
+    def test_src_layout_project_imports_with_repo_pythonpath(self, tmp_path):
+        """Repo execution should import packages placed under a src/ layout."""
+        project = tmp_path / "project"
+        package = project / "src" / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "core.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+        result = RepoContextExecutor(repo_setup="off").execute(
+            source_code="",
+            test_code=(
+                "from mypkg.core import add\n\n" "def test_add():\n" "    assert add(2, 3) == 5\n"
+            ),
+            metadata={"project_root": str(project), "code_file": "src/mypkg/core.py"},
+        )
+
+        assert result.success is True
+        assert result.tests_run == 1
 
     def test_repo_setup_prepare_blocks_on_failure(self, tmp_path, monkeypatch):
         """repo_setup=prepare must return infrastructure_error and not run pytest."""
