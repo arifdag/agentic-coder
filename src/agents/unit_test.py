@@ -120,6 +120,7 @@ Repository context:
 - Existing/target test file path: {test_file}
 - Inferred import module: {import_module}
 - Benchmark request: {user_request}
+{feedback_section}
 
 Source code under test:
 ```python
@@ -354,6 +355,7 @@ class UnitTestAgent:
         code: str,
         metadata: Mapping[str, Any],
         user_request: Optional[str] = None,
+        feedback: Optional[str] = None,
     ) -> GeneratedTest:
         """Generate a TestGenEval official-compatible pytest prediction."""
         import_module = self._metadata_value(metadata, "import_module", "unknown")
@@ -365,6 +367,13 @@ class UnitTestAgent:
                 f"- Infer the importable module from source file {code_file}; "
                 "never use source_module."
             )
+        feedback_section = ""
+        if feedback:
+            feedback_section = (
+                "\nPrevious attempt was rejected by local validation:\n"
+                f"- {feedback}\n"
+                "Correct the issue in this attempt."
+            )
         prompt = TESTGENEVAL_GENERATION_TEMPLATE.format(
             repo=self._metadata_value(metadata, "repo", "unknown"),
             version=self._metadata_value(metadata, "version", "unknown"),
@@ -373,6 +382,7 @@ class UnitTestAgent:
             import_module=import_module,
             import_guidance=import_guidance,
             user_request=user_request or "Generate pytest unit tests for the source code.",
+            feedback_section=feedback_section,
             code=code,
         )
 

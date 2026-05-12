@@ -235,6 +235,21 @@ These tests cover the basic functionality.
         assert "official TestGenEval-compatible unit tests" in llm.messages[0].content
         assert result.test_functions == ["test_model_importable"]
 
+    def test_testgeneval_prompt_includes_validation_feedback(self):
+        llm = self.CapturingLLM()
+        agent = UnitTestAgent(llm)
+
+        agent.generate_testgeneval(
+            code="class Model:\n    pass\n",
+            metadata={"import_module": "django.db.models.base"},
+            feedback="Generated test code is empty",
+        )
+
+        prompt = llm.messages[-1].content
+        assert "Previous attempt was rejected by local validation" in prompt
+        assert "Generated test code is empty" in prompt
+        assert "Correct the issue in this attempt" in prompt
+
     def test_generation_context_preserves_file_path_module_hint(self):
         agent = UnitTestAgent.__new__(UnitTestAgent)
 

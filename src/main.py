@@ -16,6 +16,31 @@ from .utils.logging import ConsoleLogger
 console = Console()
 
 
+def _generate_official_testgeneval_prediction(agent, case, max_attempts: int = 3) -> str:
+    """Generate and locally validate an official TestGenEval prediction."""
+    from .evaluation.testgeneval_official import validate_official_prediction
+
+    feedback = None
+    last_error = None
+    for _attempt in range(max_attempts):
+        generated = agent.generate_testgeneval(
+            code=case.code,
+            metadata=case.metadata,
+            user_request=case.user_request,
+            feedback=feedback,
+        )
+        try:
+            return validate_official_prediction(generated.test_code)
+        except (TypeError, ValueError) as exc:
+            last_error = exc
+            feedback = str(exc)
+
+    raise ValueError(
+        "Generated official TestGenEval prediction failed validation after "
+        f"{max_attempts} attempts: {last_error}"
+    )
+
+
 @click.group()
 @click.version_option(version="0.1.0")
 def cli():
@@ -611,12 +636,7 @@ def testgeneval_official(
     def generate_case(case):
         if verbose:
             console.print(f"[dim]Generating official prediction for {case.id}[/dim]")
-        generated = agent.generate_testgeneval(
-            code=case.code,
-            metadata=case.metadata,
-            user_request=case.user_request,
-        )
-        return generated.test_code
+        return _generate_official_testgeneval_prediction(agent, case)
 
     console.print(f"[bold]Generating predictions for {benchmark}[/bold]")
     try:

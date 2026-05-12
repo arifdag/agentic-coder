@@ -9,6 +9,7 @@ import pytest
 
 from src.evaluation.models import BenchmarkCase
 from src.evaluation.testgeneval_official import run_official_bridge, validate_official_prediction
+from src.main import _generate_official_testgeneval_prediction
 
 
 def _official_repo(tmp_path):
@@ -289,3 +290,23 @@ def test_official_bridge_rejects_empty_generation_and_skips_eval(tmp_path):
     assert result.counts == {"written": 0, "failed": 1, "total_attempted": 1}
     assert result.commands_run == []
     assert "No predictions were written" in result.errors[0]
+
+
+def test_official_generation_retries_with_validation_feedback():
+    class FakeAgent:
+        def __init__(self):
+            self.calls = []
+
+        def generate_testgeneval(self, **kwargs):
+            self.calls.append(kwargs)
+            content = "" if len(self.calls) == 1 else _valid_prediction()
+            return SimpleNamespace(test_code=content)
+
+    agent = FakeAgent()
+
+    result = _generate_official_testgeneval_prediction(agent, _case())
+
+    assert result == _valid_prediction()
+    assert len(agent.calls) == 2
+    assert agent.calls[0]["feedback"] is None
+    assert agent.calls[1]["feedback"] == "Generated test code is empty"
