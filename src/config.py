@@ -372,6 +372,13 @@ class EvalConfig(BaseModel):
     gate_policy: str = Field(default="strict")
     repo_pytest_timeout: int = Field(default=120)
 
+    # TestGenEval official bridge settings
+    testgeneval_repo_dir: str = Field(default="")
+    testgeneval_namespace: str = Field(default="kdjain")
+    testgeneval_timeout: int = Field(default=900)
+    testgeneval_num_processes: int = Field(default=1)
+    testgeneval_skip_mutation: bool = Field(default=False)
+
     _EXECUTION_CONTEXTS: ClassVar[tuple[str, ...]] = ("auto", "single-file", "repo")
     _REPO_SETUPS: ClassVar[tuple[str, ...]] = ("auto", "prepare", "reuse", "off")
     _GATE_POLICIES: ClassVar[tuple[str, ...]] = ("strict", "balanced")
@@ -399,6 +406,10 @@ class EvalConfig(BaseModel):
             self.reliability_repeats = 0
         if self.repo_pytest_timeout <= 0:
             self.repo_pytest_timeout = 120
+        if self.testgeneval_timeout <= 0:
+            self.testgeneval_timeout = 900
+        if self.testgeneval_num_processes <= 0:
+            self.testgeneval_num_processes = 1
 
     @classmethod
     def from_env(cls) -> "EvalConfig":
@@ -415,6 +426,13 @@ class EvalConfig(BaseModel):
             repo_setup=os.getenv("EVAL_REPO_SETUP", "auto"),
             gate_policy=os.getenv("EVAL_GATE_POLICY", "strict"),
             repo_pytest_timeout=int(os.getenv("EVAL_REPO_PYTEST_TIMEOUT", "120")),
+            testgeneval_repo_dir=os.getenv("TESTGENEVAL_REPO_DIR", ""),
+            testgeneval_namespace=os.getenv("TESTGENEVAL_NAMESPACE", "kdjain"),
+            testgeneval_timeout=int(os.getenv("TESTGENEVAL_TIMEOUT", "900")),
+            testgeneval_num_processes=int(os.getenv("TESTGENEVAL_NUM_PROCESSES", "1")),
+            testgeneval_skip_mutation=(
+                os.getenv("TESTGENEVAL_SKIP_MUTATION", "false").lower() == "true"
+            ),
         )
 
 

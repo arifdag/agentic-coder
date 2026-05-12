@@ -518,6 +518,147 @@ def evaluate(
         console.print(RichMarkdown(metrics.to_markdown()))
 
 
+@cli.command(name="testgeneval-official")
+@click.option(
+    "--benchmark",
+    "-b",
+    type=click.Choice(["testgeneval_lite", "testgeneval"]),
+    default="testgeneval_lite",
+    show_default=True,
+    help="TestGenEval dataset variant to score with the official Docker runner",
+)
+@click.option("--max-cases", "-n", type=int, default=None, help="Max cases to generate")
+@click.option("--output-dir", "-o", type=str, default=None, help="Results directory")
+@click.option(
+    "--provider",
+    default=None,
+    help="Override coding provider. Leave unset to use CODING_PROVIDER from .env.",
+)
+@click.option(
+    "--model-name",
+    default="llm-agent-gdr",
+    show_default=True,
+    help="Model name written into the official TestGenEval predictions JSONL",
+)
+@click.option(
+    "--official-repo-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to a cloned facebookresearch/testgeneval repository",
+)
+@click.option(
+    "--namespace",
+    default=None,
+    help="Docker image namespace used by the official TestGenEval runner",
+)
+@click.option("--timeout", type=int, default=None, help="Official per-instance timeout")
+@click.option("--num-processes", type=int, default=None, help="Official runner parallelism")
+@click.option("--skip-mutation", is_flag=True, help="Skip official mutation testing")
+@click.option(
+    "--no-skip-existing",
+    is_flag=True,
+    help="Re-run official evaluation even when logs already exist",
+)
+@click.option("--verbose", "-v", is_flag=True)
+def testgeneval_official(
+    benchmark,
+    max_cases,
+    output_dir,
+    provider,
+    model_name,
+    official_repo_dir,
+    namespace,
+    timeout,
+    num_processes,
+    skip_mutation,
+    no_skip_existing,
+    verbose,
+):
+    """Generate predictions and score them with official TestGenEval Docker scripts."""
+    import json
+
+    from .agents.unit_test import UnitTestAgent
+    from .config import Config, get_role_llm
+    from .evaluation.benchmarks import get_dataset
+    from .evaluation.testgeneval_official import run_official_bridge
+
+    config = Config.load(provider=provider)
+    config.pipeline.verbose = verbose
+
+    repo_dir = official_repo_dir or (
+        Path(config.evaluation.testgeneval_repo_dir)
+        if config.evaluation.testgeneval_repo_dir
+        else None
+    )
+    if repo_dir is None:
+        console.print(
+            "[red]Missing official TestGenEval repo path.[/red]\n"
+            "Pass --official-repo-dir or set TESTGENEVAL_REPO_DIR."
+        )
+        sys.exit(1)
+
+    effective_output_dir = Path(output_dir or config.evaluation.results_dir)
+    effective_namespace = namespace or config.evaluation.testgeneval_namespace
+    effective_timeout = timeout or config.evaluation.testgeneval_timeout
+    effective_num_processes = num_processes or config.evaluation.testgeneval_num_processes
+    effective_skip_mutation = skip_mutation or config.evaluation.testgeneval_skip_mutation
+
+    dataset = get_dataset(benchmark, data_dir=Path(config.evaluation.data_dir))
+    cases = dataset.load()
+    llm = get_role_llm(config, "coding")
+    agent = UnitTestAgent(llm)
+
+    def generate_case(case):
+        if verbose:
+            console.print(f"[dim]Generating official prediction for {case.id}[/dim]")
+        generated = agent.generate(
+            code=case.code,
+            import_module=case.metadata.get("import_module"),
+        )
+        return generated.test_code
+
+    console.print(f"[bold]Generating predictions for {benchmark}[/bold]")
+    try:
+        result = run_official_bridge(
+            benchmark=benchmark,
+            cases=cases,
+            output_dir=effective_output_dir,
+            model_name=model_name,
+            official_repo_dir=repo_dir,
+            namespace=effective_namespace,
+            timeout=effective_timeout,
+            num_processes=effective_num_processes,
+            skip_mutation=effective_skip_mutation,
+            skip_existing=not no_skip_existing,
+            max_cases=max_cases,
+            generate=generate_case,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Official TestGenEval setup error:[/red] {exc}")
+        sys.exit(1)
+
+    result_path = result.predictions_path.parent / "official_bridge_result.json"
+    result_path.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+
+    console.print("[green]Official TestGenEval bridge completed.[/green]")
+    console.print(f"Predictions: {result.predictions_path}")
+    console.print(f"Manifest: {result.manifest_path}")
+    console.print(f"Bridge result: {result_path}")
+    console.print(f"Official logs: {result.official_logs_dir}")
+    console.print(f"Official reports: {result.official_reports_dir}")
+    console.print(
+        f"Predictions written: {result.counts.get('written', 0)}; "
+        f"generation failures: {result.counts.get('failed', 0)}"
+    )
+    if result.returncodes:
+        console.print(f"Official subprocess return codes: {result.returncodes}")
+    if result.errors:
+        console.print("[yellow]Official bridge completed with errors:[/yellow]")
+        for error in result.errors:
+            console.print(f"- {error}")
+        sys.exit(1)
+
+
 @cli.command()
 @click.option("--benchmark", "-b", type=click.Choice(BENCHMARK_CHOICES), required=True)
 @click.option("--max-cases", "-n", type=int, default=None)
