@@ -137,7 +137,11 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
     eval_cmd = calls[0]
     assert "run_evaluation.py" in eval_cmd
     assert "--predictions_path" in eval_cmd
+    predictions_arg = eval_cmd[eval_cmd.index("--predictions_path") + 1]
+    assert "\\" not in predictions_arg
     assert "--log_dir" in eval_cmd
+    log_dir_arg = eval_cmd[eval_cmd.index("--log_dir") + 1]
+    assert "\\" not in log_dir_arg
     assert "--swe_bench_tasks" in eval_cmd
     assert "kjain14/testgenevallite" in eval_cmd
     assert "--namespace" in eval_cmd
@@ -152,3 +156,5 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
     report_cmd = calls[1]
     assert "generate_report.py" in report_cmd
     assert "--output_dir" in report_cmd
+    output_dir_arg = report_cmd[report_cmd.index("--output_dir") + 1]
+    assert "\\" not in output_dir_arg

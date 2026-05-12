@@ -29,6 +29,16 @@ def _truncate(text: str, limit: int = _MAX_LOG_CHARS) -> str:
     return text[:half] + f"\n... [{len(text) - limit} chars truncated] ...\n" + text[-half:]
 
 
+def _official_path_arg(path: Path) -> str:
+    """Return a path string compatible with TestGenEval's POSIX-style parsing.
+
+    TestGenEval's report utilities split log paths on "/" even on Windows.
+    Passing forward-slash paths keeps the official parser from treating the
+    whole absolute Windows path as the instance id.
+    """
+    return path.resolve().as_posix()
+
+
 @dataclass
 class OfficialBridgeResult:
     """Result of running the official TestGenEval bridge."""
@@ -283,7 +293,7 @@ def run_official_bridge(
             sys.executable,
             "run_evaluation.py",
             "--predictions_path",
-            str(predictions_path),
+            _official_path_arg(predictions_path),
             "--swe_bench_tasks",
             dataset_id,
             "--namespace",
@@ -293,7 +303,7 @@ def run_official_bridge(
             "--num_processes",
             str(num_processes),
             "--log_dir",
-            str(official_logs_dir),
+            _official_path_arg(official_logs_dir),
         ]
         if skip_mutation:
             eval_cmd.append("--skip_mutation")
@@ -309,13 +319,13 @@ def run_official_bridge(
             sys.executable,
             "generate_report.py",
             "--predictions_path",
-            str(predictions_path),
+            _official_path_arg(predictions_path),
             "--swe_bench_tasks",
             dataset_id,
             "--log_dir",
-            str(official_logs_dir),
+            _official_path_arg(official_logs_dir),
             "--output_dir",
-            str(official_reports_dir),
+            _official_path_arg(official_reports_dir),
         ]
 
         report_rc = _run_subprocess(report_cmd, official_repo_dir, result, "report")
