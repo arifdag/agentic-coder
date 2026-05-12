@@ -181,3 +181,60 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
     output_dir_arg = report_cmd[report_cmd.index("--output_dir") + 1]
     assert "\\" not in output_dir_arg
     assert output_dir_arg.endswith("/")
+
+
+def test_official_bridge_uses_fallback_when_report_cli_fails(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        if "generate_report.py" in cmd:
+            return SimpleNamespace(returncode=1, stdout="path error", stderr="KeyError")
+        logs_dir = tmp_path / "out" / "testgeneval_lite" / "official_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "django__django-1.llm-agent-gdr.full.eval.log").write_text(
+            "Tests Errored\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    def fake_fallback(
+        official_repo_dir,
+        predictions_path,
+        tasks_path,
+        logs_dir,
+        reports_dir,
+        model_name,
+    ):
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / f"{model_name}_summary.json").write_text(
+            json.dumps({"full_pass_at_1": 0.0}),
+            encoding="utf-8",
+        )
+        (reports_dir / f"{model_name}_report.json").write_text(
+            json.dumps({"with_logs": ["django__django-1"]}),
+            encoding="utf-8",
+        )
+        (reports_dir / f"{model_name}_full.json").write_text(
+            json.dumps({"django__django-1": {"full": {}}}),
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "src.evaluation.testgeneval_official._write_fallback_report_outputs",
+        fake_fallback,
+    )
+
+    result = run_official_bridge(
+        benchmark="testgeneval_lite",
+        cases=[_case("testgeneval_lite-django__django-1")],
+        output_dir=tmp_path / "out",
+        model_name="llm-agent-gdr",
+        official_repo_dir=_official_repo(tmp_path),
+        generate=lambda case: "def test_target():\n    assert True\n",
+    )
+
+    assert result.returncodes == [0, 1]
+    assert result.errors == []
+    assert result.counts["report_fallback_used"] is True
+    assert result.summary_copied is not None
+    assert result.report_copied is not None

@@ -12,7 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 from .benchmarks.testgeneval import DATASET_IDS
 from .models import BenchmarkCase
@@ -242,6 +242,165 @@ def _copy_report_outputs(
     return summary, report
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _count_methods(code_str: str) -> int:
+    import re
+
+    return len(re.findall(r"\bdef\b\s+\w+\s*\(", code_str))
+
+
+def _lines_of_code(code_str: str) -> int:
+    return len(code_str.strip().splitlines()) if code_str.strip() else 0
+
+
+def _prediction_lexical_report(predictions_path: Path, tasks_by_id: dict[str, dict]) -> dict:
+    preds = _read_jsonl(predictions_path)
+    loc: list[int] = []
+    methods: list[int] = []
+    baseline_loc: list[int] = []
+    baseline_methods: list[int] = []
+
+    for pred in preds:
+        pred_texts = (pred.get("preds") or {}).get("full") or []
+        for pred_text in pred_texts:
+            if isinstance(pred_text, str):
+                loc.append(_lines_of_code(pred_text))
+                methods.append(_count_methods(pred_text))
+
+        task = tasks_by_id.get(pred.get("id")) or {}
+        baseline = (task.get("preds_context") or {}).get("last") or ""
+        if isinstance(baseline, list):
+            baseline = baseline[0] if baseline else ""
+        if isinstance(baseline, str):
+            baseline_loc.append(_lines_of_code(baseline))
+            baseline_methods.append(_count_methods(baseline))
+
+    report: dict[str, Any] = {}
+    if loc:
+        report["av_pred_full_loc"] = sum(loc) / len(loc)
+        report["av_pred_full_num_methods"] = sum(methods) / len(methods)
+    if baseline_loc:
+        report["av_baseline_loc"] = sum(baseline_loc) / len(baseline_loc)
+        report["av_baseline_num_methods"] = sum(baseline_methods) / len(baseline_methods)
+    return report
+
+
+def _summarize_official_reports(predictions_path: Path, detailed_report: dict) -> dict:
+    predictions = _read_jsonl(predictions_path)
+    summary: dict[str, Any] = {
+        "repo": "all",
+        "total_predictions": len(predictions),
+    }
+    total_metrics: dict[str, list[Any]] = {}
+    for case_report in detailed_report.values():
+        for key, value in case_report.items():
+            total_metrics.setdefault(key, []).append(value)
+
+    for metric, values in total_metrics.items():
+        clean_values = [value for value in values if value != -1]
+        if not clean_values:
+            summary[metric] = -1
+        else:
+            summary[metric] = sum(clean_values) / len(clean_values)
+    return summary
+
+
+def _build_report_map(predictions_path: Path, logs_dir: Path, model_name: str) -> dict:
+    predictions = _read_jsonl(predictions_path)
+    report = {
+        "no_generation": [],
+        "generated": [],
+        "with_logs": [],
+        "install_fail": [],
+        "reset_failed": [],
+        "test_errored": [],
+        "test_timeout": [],
+        "mutation_timeout": [],
+    }
+    for pred in predictions:
+        case_id = pred.get("id")
+        if not case_id:
+            continue
+        preds = pred.get("preds") or {}
+        if not preds.get("full"):
+            report["no_generation"].append(case_id)
+            continue
+        report["generated"].append(case_id)
+        log_path = logs_dir / f"{case_id}.{model_name}.full.eval.log"
+        if not log_path.exists():
+            continue
+        report["with_logs"].append(case_id)
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+        if "Reset Failed" in content:
+            report["reset_failed"].append(case_id)
+        if "Tests Errored" in content:
+            report["test_errored"].append(case_id)
+        if "Test script run timed out" in content or "Tests Timed Out" in content:
+            report["test_timeout"].append(case_id)
+        if "MutationTimeout" in content:
+            report["mutation_timeout"].append(case_id)
+    return report
+
+
+def _write_fallback_report_outputs(
+    official_repo_dir: Path,
+    predictions_path: Path,
+    tasks_path: Path,
+    logs_dir: Path,
+    reports_dir: Path,
+    model_name: str,
+) -> bool:
+    """Generate official report artifacts without the Windows-broken report CLI."""
+    sys.path.insert(0, str(official_repo_dir))
+    try:
+        from swebench_docker.swebench_utils import get_eval_reports_for_logs
+
+        tasks_by_id = {task["id"]: task for task in _read_jsonl(tasks_path)}
+        log_paths = sorted(logs_dir.glob(f"*{model_name}*.log"))
+        if not log_paths:
+            return False
+
+        normalized_logs = [_official_path_arg(path) for path in log_paths]
+        raw_report = get_eval_reports_for_logs(
+            normalized_logs,
+            tasks_by_id,
+            verbose=False,
+            raw_only=True,
+        )
+        detailed_report = get_eval_reports_for_logs(
+            normalized_logs,
+            tasks_by_id,
+            verbose=False,
+            raw_only=False,
+        )
+        summary = _summarize_official_reports(predictions_path, detailed_report)
+        summary.update(_prediction_lexical_report(predictions_path, tasks_by_id))
+        report = _build_report_map(predictions_path, logs_dir, model_name)
+    finally:
+        try:
+            sys.path.remove(str(official_repo_dir))
+        except ValueError:
+            pass
+
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (reports_dir / f"{model_name}_full.json").write_text(
+        json.dumps(raw_report, indent=4),
+        encoding="utf-8",
+    )
+    (reports_dir / f"{model_name}_summary.json").write_text(
+        json.dumps(summary, indent=4),
+        encoding="utf-8",
+    )
+    (reports_dir / f"{model_name}_report.json").write_text(
+        json.dumps(report, indent=4),
+        encoding="utf-8",
+    )
+    return True
+
+
 def run_official_bridge(
     benchmark: str,
     cases: Iterable[BenchmarkCase],
@@ -368,7 +527,26 @@ def run_official_bridge(
             _official_dir_arg(official_reports_dir),
         ]
 
+        error_start = len(result.errors)
         report_rc = _run_subprocess(report_cmd, official_repo_dir, result, "report")
+
+        if report_rc != 0:
+            try:
+                fallback_ok = _write_fallback_report_outputs(
+                    official_repo_dir,
+                    predictions_path,
+                    tasks_path,
+                    official_logs_dir,
+                    official_reports_dir,
+                    model_name,
+                )
+            except Exception as exc:  # noqa: BLE001 - fallback should report, not crash
+                fallback_ok = False
+                result.errors.append(f"fallback report generation failed: {exc}")
+            if fallback_ok:
+                report_rc = 0
+                del result.errors[error_start:]
+                result.counts["report_fallback_used"] = True
 
         result.summary_copied, result.report_copied = _copy_report_outputs(
             official_reports_dir,
