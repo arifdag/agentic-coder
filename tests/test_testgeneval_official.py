@@ -257,6 +257,13 @@ def test_validate_official_prediction_rejects_unusable_outputs():
         validate_official_prediction("from django.example import target\n")
     with pytest.raises(ValueError, match="dummy assertions"):
         validate_official_prediction("def test_placeholder():\n    assert True\n")
+    with pytest.raises(ValueError, match="must not import or use pytest"):
+        validate_official_prediction(
+            "import pytest\n\n"
+            "def test_error_path():\n"
+            "    with pytest.raises(ValueError):\n"
+            "        raise ValueError('x')\n"
+        )
     with pytest.raises(ValueError, match="not test classes"):
         validate_official_prediction(
             "class TestTarget:\n"

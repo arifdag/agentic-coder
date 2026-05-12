@@ -108,7 +108,10 @@ Requirements:
 
 Generate the complete test file now:"""
 
-TESTGENEVAL_GENERATION_TEMPLATE = """Generate a pytest test file for an official TestGenEval evaluation case.
+TESTGENEVAL_SYSTEM_PROMPT = """You are an expert Python test engineer. Generate official TestGenEval-compatible unit tests.
+Return only Python code. Do not use pytest-only APIs unless the prompt explicitly allows them."""
+
+TESTGENEVAL_GENERATION_TEMPLATE = """Generate a Python unit test file for an official TestGenEval evaluation case.
 
 Repository context:
 - Repository: {repo}
@@ -124,11 +127,14 @@ Source code under test:
 ```
 
 Critical output requirements:
-- Return NON-EMPTY Python pytest code only. Do not return markdown, prose, or an empty response.
-- Define file-level pytest test functions named test_*.
+- Return NON-EMPTY Python test code only. Do not return markdown, prose, or an empty response.
+- Define file-level test functions named test_*.
 - Do NOT define test classes, including Test* classes. The official TestGenEval
   postprocessor extracts file-level functions most reliably, and class-based
   output can break Django postprocessing.
+- Do NOT import pytest or use pytest.raises. Some official TestGenEval
+  containers, including Django, run with unittest and do not install pytest.
+- For exception checks, use plain try/except/else with assert statements.
 - Import the real target from the repository module.
 {import_guidance}
 - If the exact symbol name is unclear, inspect the source code and import the public functions/classes it defines.
@@ -140,7 +146,7 @@ Critical output requirements:
 - Avoid network, sleeps, wall-clock timing, randomness without fixed seeds, or external services.
 - Keep the test file focused and deterministic.
 
-Return the complete pytest file now, with imports at the top and no surrounding explanation:"""
+Return the complete Python test file now, with imports at the top and no surrounding explanation:"""
 
 REPAIR_TEMPLATE = """The previously generated test code failed verification.
 
@@ -371,7 +377,7 @@ class UnitTestAgent:
         )
 
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
+            SystemMessage(content=TESTGENEVAL_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
 

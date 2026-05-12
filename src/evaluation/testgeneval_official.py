@@ -130,6 +130,18 @@ def validate_official_prediction(test_code: str) -> str:
     except SyntaxError as exc:
         raise ValueError(f"Generated test code is not valid Python: {exc.msg}") from exc
 
+    imports_pytest = any(
+        (isinstance(node, ast.Import) and any(alias.name == "pytest" for alias in node.names))
+        or (isinstance(node, ast.ImportFrom) and node.module == "pytest")
+        for node in tree.body
+    )
+    uses_pytest = any(isinstance(node, ast.Name) and node.id == "pytest" for node in ast.walk(tree))
+    if imports_pytest or uses_pytest:
+        raise ValueError(
+            "Generated TestGenEval full-mode code must not import or use pytest; "
+            "official repo containers may run with unittest only"
+        )
+
     class_tests = [
         node.name
         for node in ast.walk(tree)
