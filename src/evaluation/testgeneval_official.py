@@ -39,11 +39,17 @@ def _official_path_arg(path: Path) -> str:
     return path.resolve().as_posix()
 
 
+def _official_dir_arg(path: Path) -> str:
+    """Return a forward-slash directory path that keeps Windows glob output parseable."""
+    return _official_path_arg(path).rstrip("/") + "/"
+
+
 @dataclass
 class OfficialBridgeResult:
     """Result of running the official TestGenEval bridge."""
 
     predictions_path: Path
+    tasks_path: Path
     manifest_path: Path
     official_logs_dir: Path
     official_reports_dir: Path
@@ -59,6 +65,7 @@ class OfficialBridgeResult:
     def to_dict(self) -> dict:
         return {
             "predictions_path": str(self.predictions_path),
+            "tasks_path": str(self.tasks_path),
             "manifest_path": str(self.manifest_path),
             "official_logs_dir": str(self.official_logs_dir),
             "official_reports_dir": str(self.official_reports_dir),
@@ -84,24 +91,34 @@ def _validate_official_repo(official_repo_dir: Path) -> None:
 
 def _write_predictions_jsonl(
     predictions_path: Path,
+    tasks_path: Path,
     cases: Iterable[BenchmarkCase],
     model_name: str,
     generate: Callable[[BenchmarkCase], str],
     max_cases: Optional[int] = None,
 ) -> tuple[int, int, List[dict]]:
     predictions_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     failed = 0
     manifest_entries: List[dict] = []
 
-    with predictions_path.open("w", encoding="utf-8") as f:
+    with (
+        predictions_path.open("w", encoding="utf-8") as pred_file,
+        tasks_path.open("w", encoding="utf-8") as task_file,
+    ):
         for i, case in enumerate(cases):
             if max_cases is not None and i >= max_cases:
                 break
+            official_id = case.metadata.get("id") or case.id
+            instance_id = case.metadata.get("instance_id") or official_id
+            task_file.write(
+                json.dumps(_official_task_record(case, official_id, instance_id)) + "\n"
+            )
             entry: dict = {
                 "case_index": i,
                 "case_id": case.id,
-                "official_id": case.metadata.get("id") or case.id,
+                "official_id": official_id,
                 "status": "ok",
                 "error": None,
             }
@@ -109,15 +126,13 @@ def _write_predictions_jsonl(
                 test_code = generate(case)
                 if not isinstance(test_code, str):
                     raise TypeError(f"Generator returned {type(test_code)}, expected str")
-                official_id = case.metadata.get("id") or case.id
-                instance_id = case.metadata.get("instance_id") or official_id
                 record = {
                     "id": official_id,
                     "instance_id": instance_id,
                     "model_name_or_path": model_name,
                     "preds": {"full": [test_code]},
                 }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 written += 1
             except Exception as exc:
                 failed += 1
@@ -127,6 +142,30 @@ def _write_predictions_jsonl(
             manifest_entries.append(entry)
 
     return written, failed, manifest_entries
+
+
+def _official_task_record(case: BenchmarkCase, official_id: str, instance_id: str) -> dict:
+    """Build a local task record accepted by the official TestGenEval scripts."""
+    metadata = dict(case.metadata)
+    preds_context = metadata.get("preds_context")
+    if not isinstance(preds_context, dict):
+        preds_context = {}
+    preds_context.setdefault("code_src", case.code)
+    preds_context.setdefault("last", "")
+
+    return {
+        "id": official_id,
+        "instance_id": instance_id,
+        "repo": metadata.get("repo", ""),
+        "version": metadata.get("version", ""),
+        "base_commit": metadata.get("base_commit", ""),
+        "code_file": metadata.get("code_file", ""),
+        "test_file": metadata.get("test_file", ""),
+        "preds_context": preds_context,
+        "test_patch": metadata.get("test_patch", ""),
+        "patch": metadata.get("patch", ""),
+        "baseline_covs": metadata.get("baseline_covs", {}),
+    }
 
 
 def _run_subprocess(
@@ -251,11 +290,11 @@ def run_official_bridge(
     output_dir = output_dir.resolve()
     _validate_official_repo(official_repo_dir)
 
-    dataset_id = DATASET_IDS[benchmark]
     bench_out = output_dir / benchmark
     bench_out.mkdir(parents=True, exist_ok=True)
 
     predictions_path = bench_out / "predictions.jsonl"
+    tasks_path = bench_out / "official_tasks.jsonl"
     manifest_path = bench_out / "generation_manifest.json"
     official_logs_dir = bench_out / "official_logs"
     official_reports_dir = bench_out / "official_reports"
@@ -264,6 +303,7 @@ def run_official_bridge(
 
     result = OfficialBridgeResult(
         predictions_path=predictions_path,
+        tasks_path=tasks_path,
         manifest_path=manifest_path,
         official_logs_dir=official_logs_dir,
         official_reports_dir=official_reports_dir,
@@ -271,7 +311,7 @@ def run_official_bridge(
 
     # Generate predictions
     written, failed, manifest = _write_predictions_jsonl(
-        predictions_path, cases, model_name, generate, max_cases
+        predictions_path, tasks_path, cases, model_name, generate, max_cases
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     result.counts = {
@@ -295,7 +335,7 @@ def run_official_bridge(
             "--predictions_path",
             _official_path_arg(predictions_path),
             "--swe_bench_tasks",
-            dataset_id,
+            _official_path_arg(tasks_path),
             "--namespace",
             namespace,
             "--timeout",
@@ -303,7 +343,7 @@ def run_official_bridge(
             "--num_processes",
             str(num_processes),
             "--log_dir",
-            _official_path_arg(official_logs_dir),
+            _official_dir_arg(official_logs_dir),
         ]
         if skip_mutation:
             eval_cmd.append("--skip_mutation")
@@ -321,11 +361,11 @@ def run_official_bridge(
             "--predictions_path",
             _official_path_arg(predictions_path),
             "--swe_bench_tasks",
-            dataset_id,
+            _official_path_arg(tasks_path),
             "--log_dir",
-            _official_path_arg(official_logs_dir),
+            _official_dir_arg(official_logs_dir),
             "--output_dir",
-            _official_path_arg(official_reports_dir),
+            _official_dir_arg(official_reports_dir),
         ]
 
         report_rc = _run_subprocess(report_cmd, official_repo_dir, result, "report")

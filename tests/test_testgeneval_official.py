@@ -24,7 +24,19 @@ def _case(case_id: str = "testgeneval_lite-django__django-1") -> BenchmarkCase:
         id=case_id,
         code="def target():\n    return 1\n",
         language="python",
-        metadata={"id": "row-1", "instance_id": "django__django-1"},
+        metadata={
+            "id": "row-1",
+            "instance_id": "django__django-1",
+            "repo": "django/django",
+            "version": "5.0",
+            "base_commit": "abc123",
+            "code_file": "django/example.py",
+            "test_file": "tests/test_example.py",
+            "preds_context": {"code_src": "def target():\n    return 1\n", "last": ""},
+            "test_patch": "diff --git a/tests/test_example.py b/tests/test_example.py\n",
+            "patch": "diff --git a/django/example.py b/django/example.py\n",
+            "baseline_covs": {"line_coverage": 10.0},
+        },
     )
 
 
@@ -75,6 +87,13 @@ def test_official_bridge_writes_prediction_jsonl_and_manifest(monkeypatch, tmp_p
         }
     ]
     assert json.loads(result.manifest_path.read_text(encoding="utf-8"))[0]["status"] == "ok"
+    tasks = [
+        json.loads(line) for line in result.tasks_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert tasks[0]["id"] == "row-1"
+    assert tasks[0]["instance_id"] == "django__django-1"
+    assert tasks[0]["repo"] == "django/django"
+    assert tasks[0]["baseline_covs"] == {"line_coverage": 10.0}
     assert result.summary_copied is not None
     assert result.report_copied is not None
     assert len(calls) == 2
@@ -142,8 +161,11 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
     assert "--log_dir" in eval_cmd
     log_dir_arg = eval_cmd[eval_cmd.index("--log_dir") + 1]
     assert "\\" not in log_dir_arg
+    assert log_dir_arg.endswith("/")
     assert "--swe_bench_tasks" in eval_cmd
-    assert "kjain14/testgenevallite" in eval_cmd
+    tasks_arg = eval_cmd[eval_cmd.index("--swe_bench_tasks") + 1]
+    assert tasks_arg.endswith("official_tasks.jsonl")
+    assert "\\" not in tasks_arg
     assert "--namespace" in eval_cmd
     assert "kdjain" in eval_cmd
     assert "--timeout" in eval_cmd
@@ -158,3 +180,4 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
     assert "--output_dir" in report_cmd
     output_dir_arg = report_cmd[report_cmd.index("--output_dir") + 1]
     assert "\\" not in output_dir_arg
+    assert output_dir_arg.endswith("/")
