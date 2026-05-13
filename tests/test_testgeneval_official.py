@@ -196,6 +196,106 @@ def test_official_bridge_command_arguments(monkeypatch, tmp_path):
     assert output_dir_arg.endswith("/")
 
 
+def test_official_bridge_reuses_existing_predictions(monkeypatch, tmp_path):
+    bench_out = tmp_path / "out" / "testgeneval_lite"
+    reports_dir = bench_out / "official_reports"
+    bench_out.mkdir(parents=True)
+    reports_dir.mkdir()
+    (bench_out / "predictions.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "row-1",
+                "instance_id": "django__django-1",
+                "model_name_or_path": "llm-agent-gdr",
+                "preds": {"full": [_valid_prediction()]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (bench_out / "official_tasks.jsonl").write_text(
+        json.dumps({"id": "row-1", "instance_id": "django__django-1"}) + "\n",
+        encoding="utf-8",
+    )
+    (bench_out / "generation_manifest.json").write_text(
+        json.dumps(
+            [
+                {"status": "ok"},
+                {"status": "failed", "error": "Generated test code is empty"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if "generate_report.py" in cmd:
+            (reports_dir / "llm-agent-gdr_summary.json").write_text(
+                json.dumps({"full_pass_at_1": 1.0}),
+                encoding="utf-8",
+            )
+            (reports_dir / "llm-agent-gdr_report.json").write_text(
+                json.dumps({"with_logs": ["row-1"]}),
+                encoding="utf-8",
+            )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = run_official_bridge(
+        benchmark="testgeneval_lite",
+        cases=[],
+        output_dir=tmp_path / "out",
+        model_name="llm-agent-gdr",
+        official_repo_dir=_official_repo(tmp_path),
+        generate=lambda case: (_ for _ in ()).throw(AssertionError("should not generate")),
+        reuse_predictions=True,
+    )
+
+    assert result.counts["written"] == 1
+    assert result.counts["failed"] == 1
+    assert result.counts["total_attempted"] == 2
+    assert len(result.commands_run) == 2
+    assert result.summary_copied is not None
+
+
+def test_official_bridge_stages_log_dir_when_output_path_has_spaces(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+    output_dir = tmp_path / "out with space"
+    reports_dir = output_dir / "testgeneval_lite" / "official_reports"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "generate_report.py" in cmd:
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            (reports_dir / "llm-agent-gdr_summary.json").write_text(
+                json.dumps({"full_pass_at_1": 1.0}),
+                encoding="utf-8",
+            )
+            (reports_dir / "llm-agent-gdr_report.json").write_text(
+                json.dumps({"with_logs": ["row-1"]}),
+                encoding="utf-8",
+            )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = run_official_bridge(
+        benchmark="testgeneval_lite",
+        cases=[_case()],
+        output_dir=output_dir,
+        model_name="llm-agent-gdr",
+        official_repo_dir=_official_repo(tmp_path),
+        generate=lambda case: _valid_prediction(),
+    )
+
+    assert result.staging_logs_dir is not None
+    assert result.counts["staging_logs_used"] is True
+    eval_cmd = calls[0]
+    log_dir_arg = eval_cmd[eval_cmd.index("--log_dir") + 1]
+    assert "out with space" not in log_dir_arg
+    assert " " not in log_dir_arg
+
+
 def test_official_bridge_uses_fallback_when_report_cli_fails(monkeypatch, tmp_path):
     def fake_run(cmd, **kwargs):
         if "generate_report.py" in cmd:

@@ -590,6 +590,11 @@ def evaluate(
     is_flag=True,
     help="Re-run official evaluation even when logs already exist",
 )
+@click.option(
+    "--reuse-predictions",
+    is_flag=True,
+    help="Reuse existing predictions.jsonl/official_tasks.jsonl and rerun official scoring only",
+)
 @click.option("--verbose", "-v", is_flag=True)
 def testgeneval_official(
     benchmark,
@@ -603,6 +608,7 @@ def testgeneval_official(
     num_processes,
     skip_mutation,
     no_skip_existing,
+    reuse_predictions,
     verbose,
 ):
     """Generate predictions and score them with official TestGenEval Docker scripts."""
@@ -634,17 +640,25 @@ def testgeneval_official(
     effective_num_processes = num_processes or config.evaluation.testgeneval_num_processes
     effective_skip_mutation = skip_mutation or config.evaluation.testgeneval_skip_mutation
 
-    dataset = get_dataset(benchmark, data_dir=Path(config.evaluation.data_dir))
-    cases = dataset.load()
-    llm = get_role_llm(config, "coding")
-    agent = UnitTestAgent(llm)
+    if reuse_predictions:
+        cases = []
 
-    def generate_case(case):
-        if verbose:
-            console.print(f"[dim]Generating official prediction for {case.id}[/dim]")
-        return _generate_official_testgeneval_prediction(agent, case)
+        def generate_case(case):
+            raise RuntimeError("generation disabled by --reuse-predictions")
 
-    console.print(f"[bold]Generating predictions for {benchmark}[/bold]")
+        console.print(f"[bold]Reusing predictions for {benchmark}[/bold]")
+    else:
+        dataset = get_dataset(benchmark, data_dir=Path(config.evaluation.data_dir))
+        cases = dataset.load()
+        llm = get_role_llm(config, "coding")
+        agent = UnitTestAgent(llm)
+
+        def generate_case(case):
+            if verbose:
+                console.print(f"[dim]Generating official prediction for {case.id}[/dim]")
+            return _generate_official_testgeneval_prediction(agent, case)
+
+        console.print(f"[bold]Generating predictions for {benchmark}[/bold]")
     try:
         result = run_official_bridge(
             benchmark=benchmark,
@@ -663,6 +677,7 @@ def testgeneval_official(
                 code,
                 allow_test_classes=True,
             ),
+            reuse_predictions=reuse_predictions,
         )
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[red]Official TestGenEval setup error:[/red] {exc}")

@@ -7,11 +7,14 @@ TestGenEval evaluation/report scripts as subprocesses.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional
@@ -46,6 +49,30 @@ def _official_dir_arg(path: Path) -> str:
     return _official_path_arg(path).rstrip("/") + "/"
 
 
+def _needs_docker_safe_path(path: Path) -> bool:
+    """Return True when TestGenEval's Docker command is likely to mishandle a path."""
+    return " " in str(path.resolve())
+
+
+def _staging_logs_dir_for(logs_dir: Path, benchmark: str) -> Path:
+    """Create a deterministic no-space staging path for official Docker logs."""
+    key = hashlib.sha1(str(logs_dir.resolve()).encode("utf-8")).hexdigest()[:12]
+    return Path(tempfile.gettempdir()) / "llm_agent_testgeneval" / key / benchmark / "official_logs"
+
+
+def _copy_tree_contents(src: Path, dst: Path) -> None:
+    """Copy files from a staging directory into the requested artifact directory."""
+    if not src.exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            shutil.copytree(item, target, dirs_exist_ok=True)
+        elif item.is_file():
+            shutil.copy2(item, target)
+
+
 @dataclass
 class OfficialBridgeResult:
     """Result of running the official TestGenEval bridge."""
@@ -55,6 +82,7 @@ class OfficialBridgeResult:
     manifest_path: Path
     official_logs_dir: Path
     official_reports_dir: Path
+    staging_logs_dir: Optional[Path] = None
     summary_copied: Optional[Path] = None
     report_copied: Optional[Path] = None
     commands_run: List[List[str]] = field(default_factory=list)
@@ -71,6 +99,7 @@ class OfficialBridgeResult:
             "manifest_path": str(self.manifest_path),
             "official_logs_dir": str(self.official_logs_dir),
             "official_reports_dir": str(self.official_reports_dir),
+            "staging_logs_dir": str(self.staging_logs_dir) if self.staging_logs_dir else None,
             "summary_copied": str(self.summary_copied) if self.summary_copied else None,
             "report_copied": str(self.report_copied) if self.report_copied else None,
             "commands_run": self.commands_run,
@@ -439,6 +468,28 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def _existing_generation_counts(predictions_path: Path, manifest_path: Path) -> dict[str, int]:
+    """Summarize already-generated official predictions for scorer-only reruns."""
+    written = len(_read_jsonl(predictions_path)) if predictions_path.is_file() else 0
+    failed = 0
+    total_attempted = written
+
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = []
+        if isinstance(manifest, list):
+            failed = sum(1 for entry in manifest if entry.get("status") != "ok")
+            total_attempted = len(manifest)
+
+    return {
+        "written": written,
+        "failed": failed,
+        "total_attempted": total_attempted,
+    }
+
+
 def _count_methods(code_str: str) -> int:
     import re
 
@@ -609,6 +660,7 @@ def run_official_bridge(
     max_cases: Optional[int] = None,
     generate: Callable[[BenchmarkCase], str],
     validate_prediction: Optional[Callable[[str], str]] = validate_official_prediction,
+    reuse_predictions: bool = False,
 ) -> OfficialBridgeResult:
     """Run the official TestGenEval bridge.
 
@@ -628,6 +680,8 @@ def run_official_bridge(
             generated test code as a ``str``.
         validate_prediction: Optional generated-test validator. Defaults to
             rejecting empty, non-Python, no-test, and dummy-only predictions.
+        reuse_predictions: Skip generation and score existing predictions/tasks
+            files in the requested output directory.
 
     Returns:
         ``OfficialBridgeResult`` with paths, counts, commands, return codes,
@@ -655,6 +709,10 @@ def run_official_bridge(
     official_reports_dir = bench_out / "official_reports"
     official_logs_dir.mkdir(parents=True, exist_ok=True)
     official_reports_dir.mkdir(parents=True, exist_ok=True)
+    eval_logs_dir = official_logs_dir
+    if _needs_docker_safe_path(official_logs_dir):
+        eval_logs_dir = _staging_logs_dir_for(official_logs_dir, benchmark)
+        eval_logs_dir.mkdir(parents=True, exist_ok=True)
 
     result = OfficialBridgeResult(
         predictions_path=predictions_path,
@@ -662,30 +720,48 @@ def run_official_bridge(
         manifest_path=manifest_path,
         official_logs_dir=official_logs_dir,
         official_reports_dir=official_reports_dir,
+        staging_logs_dir=eval_logs_dir if eval_logs_dir != official_logs_dir else None,
     )
 
-    # Generate predictions
-    written, failed, manifest = _write_predictions_jsonl(
-        predictions_path,
-        tasks_path,
-        cases,
-        model_name,
-        generate,
-        max_cases,
-        validate_prediction,
-    )
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    result.counts = {
-        "written": written,
-        "failed": failed,
-        "total_attempted": written + failed,
-    }
-    log.info(
-        "Wrote %d predictions (%d failed) to %s",
-        written,
-        failed,
-        predictions_path,
-    )
+    if reuse_predictions:
+        missing = [str(path) for path in (predictions_path, tasks_path) if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "Cannot reuse official TestGenEval predictions; missing files: "
+                + ", ".join(missing)
+            )
+        result.counts = _existing_generation_counts(predictions_path, manifest_path)
+        written = result.counts["written"]
+        log.info("Reusing %d existing predictions from %s", written, predictions_path)
+    else:
+        # Generate predictions
+        written, failed, manifest = _write_predictions_jsonl(
+            predictions_path,
+            tasks_path,
+            cases,
+            model_name,
+            generate,
+            max_cases,
+            validate_prediction,
+        )
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result.counts = {
+            "written": written,
+            "failed": failed,
+            "total_attempted": written + failed,
+        }
+        log.info(
+            "Wrote %d predictions (%d failed) to %s",
+            written,
+            failed,
+            predictions_path,
+        )
+
+    if result.staging_logs_dir:
+        result.counts["staging_logs_used"] = True
 
     # Run official evaluation
     eval_rc = report_rc = 0
@@ -704,7 +780,7 @@ def run_official_bridge(
             "--num_processes",
             str(num_processes),
             "--log_dir",
-            _official_dir_arg(official_logs_dir),
+            _official_dir_arg(eval_logs_dir),
         ]
         if skip_mutation:
             eval_cmd.append("--skip_mutation")
@@ -724,7 +800,7 @@ def run_official_bridge(
             "--swe_bench_tasks",
             _official_path_arg(tasks_path),
             "--log_dir",
-            _official_dir_arg(official_logs_dir),
+            _official_dir_arg(eval_logs_dir),
             "--output_dir",
             _official_dir_arg(official_reports_dir),
         ]
@@ -738,7 +814,7 @@ def run_official_bridge(
                     official_repo_dir,
                     predictions_path,
                     tasks_path,
-                    official_logs_dir,
+                    eval_logs_dir,
                     official_reports_dir,
                     model_name,
                 )
@@ -755,6 +831,8 @@ def run_official_bridge(
             bench_out,
             model_name,
         )
+        if result.staging_logs_dir:
+            _copy_tree_contents(eval_logs_dir, official_logs_dir)
     else:
         result.errors.append("No predictions were written; official evaluation was skipped.")
 
