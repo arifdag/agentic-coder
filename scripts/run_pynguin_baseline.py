@@ -40,6 +40,14 @@ def _generated_tests(output_dir: Path) -> str:
     return "\n\n".join(path.read_text(encoding="utf-8", errors="replace") for path in files)
 
 
+def _timeout_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _run_case(case, sandbox_config: SandboxConfig, seconds: int) -> EvalResult:
     start = time.time()
     if case.language != "python":
@@ -65,21 +73,48 @@ def _run_case(case, sandbox_config: SandboxConfig, seconds: int) -> EvalResult:
         ]
         env = dict(os.environ)
         env.setdefault("PYNGUIN_DANGER_AWARE", "YES")
-        completed = subprocess.run(
-            cmd,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=seconds + 30,
-        )
+        timed_out = False
+        timeout_seconds = seconds + 30
+        try:
+            completed = subprocess.run(
+                cmd,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            returncode = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            returncode = None
+            stdout = _timeout_text(exc.stdout)
+            stderr = _timeout_text(exc.stderr)
+
         test_code = _generated_tests(output_dir)
         if not test_code.strip():
-            error = completed.stderr.strip() or completed.stdout.strip() or "no tests generated"
+            if timed_out:
+                error = (
+                    f"Pynguin timed out after {timeout_seconds}s "
+                    f"(maximum-search-time={seconds}s)"
+                )
+                detail = (stderr.strip() or stdout.strip())[:300]
+                if detail:
+                    error = f"{error}: {detail}"
+            else:
+                error = stderr.strip() or stdout.strip() or "no tests generated"
             return EvalResult(
                 case_id=case.id,
                 error=error[:500],
                 elapsed_seconds=round(time.time() - start, 2),
+                pipeline_state={
+                    "baseline": "pynguin",
+                    "returncode": returncode,
+                    "timed_out": timed_out,
+                    "timeout_seconds": timeout_seconds if timed_out else None,
+                },
             )
 
         sandbox = SandboxExecutor(sandbox_config)
@@ -91,7 +126,12 @@ def _run_case(case, sandbox_config: SandboxConfig, seconds: int) -> EvalResult:
             tests_run=result.tests_run,
             tests_passed=result.tests_passed,
             coverage=result.coverage,
-            pipeline_state={"baseline": "pynguin", "returncode": completed.returncode},
+            pipeline_state={
+                "baseline": "pynguin",
+                "returncode": returncode,
+                "timed_out": timed_out,
+                "timeout_seconds": timeout_seconds if timed_out else None,
+            },
             error=None if result.success else result.stderr[:500],
         )
 
