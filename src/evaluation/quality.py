@@ -155,8 +155,11 @@ def compute_relevance_metrics(
         not relevance_pass
         or analysis.negative_signals.get("target_redefined", False)
         or analysis.negative_signals.get("dummy_assertions_only", False)
+        or analysis.negative_signals.get("generic_public_api_gaming", False)
     )
     gaming_flag = bool(passed) and structural_gaming_flag
+    line_cov = target_cov.get("target_line_coverage")
+    target_coverage_relevance = (float(line_cov) / 100.0) if line_cov is not None else None
     return {
         "eligible": analysis.eligible,
         "target": target,
@@ -174,6 +177,13 @@ def compute_relevance_metrics(
         "target_line_coverage": target_cov.get("target_line_coverage"),
         "target_branch_coverage": target_cov.get("target_branch_coverage"),
         "target_executed_line_count": target_cov.get("target_executed_line_count"),
+        "direct_target_relevance": analysis.signals.get("calls_target_directly", False),
+        "indirect_target_relevance": analysis.signals.get("calls_target_via_module", False),
+        "assertion_relevance": analysis.signals.get("asserts_target_or_source", False),
+        "target_coverage_relevance": target_coverage_relevance,
+        "generic_public_api_gaming": analysis.negative_signals.get(
+            "generic_public_api_gaming", False
+        ),
     }
 
 

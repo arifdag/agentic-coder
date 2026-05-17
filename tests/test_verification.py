@@ -892,6 +892,51 @@ class TestRelevanceValidator:
         result = v.validate(test, source_code=source)
         assert result.passed
 
+    def test_import_only_target_assertion_fails_with_actionable_message(self):
+        v = RelevanceValidator()
+        source = "def add(a, b):\n    return a + b\n"
+        test = (
+            "from source_module import add\n\n"
+            "def test_imports_add():\n"
+            "    assert add is not None\n"
+        )
+        result = v.validate(test, source_code=source)
+        assert not result.passed
+        assert any(f.code == "generic_public_api_gaming" for f in result.findings)
+        assert any("add" in f.message for f in result.findings)
+
+    def test_generic_api_smoke_failure(self):
+        v = RelevanceValidator()
+        source = "def add(a, b):\n    return a + b\n"
+        test = (
+            "import source_module\n"
+            "def test_smoke():\n"
+            "    assert source_module is not None\n"
+            "    assert hasattr(source_module, 'add')\n"
+        )
+        result = v.validate(test, source_code=source)
+        assert not result.passed
+        assert any(f.code == "generic_public_api_gaming" for f in result.findings)
+
+    def test_class_instantiation_passes(self):
+        v = RelevanceValidator()
+        source = "class Card:\n    def __init__(self, rank):\n        self.rank = rank\n"
+        test = (
+            "import source_module\n\n"
+            "def test_card():\n"
+            "    card = source_module.Card('A')\n"
+            "    assert card.rank == 'A'\n"
+        )
+        result = v.validate(test, source_code=source)
+        assert result.passed
+
+    def test_balanced_wildcard_requires_call_not_generic(self):
+        v = RelevanceValidator()
+        source = "def foo(x):\n    return x\n"
+        test = "from source_module import *\n" "def test_foo():\n" "    assert foo is not None\n"
+        result = v.validate(test, source_code=source)
+        assert not result.passed
+
     def test_no_target_just_imports_source_passes(self):
         v = RelevanceValidator()
         test = (

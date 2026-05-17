@@ -221,6 +221,7 @@ def create_pipeline(config: Optional[Config] = None):
                     code=state["code_input"],
                     file_path=state.get("file_path"),
                     import_module=repo_meta.get("import_module"),
+                    target_function=state.get("target_function"),
                 )
         elif task_type == TaskType.UI_TEST.value:
             ui_result = ui_test_agent.generate(
@@ -629,6 +630,7 @@ def create_pipeline(config: Optional[Config] = None):
                 coverage_gaps=state.get("coverage_report"),
                 diagnostics=diagnostics,
                 import_module=repo_meta.get("import_module"),
+                target_function=state.get("target_function"),
             )
             if lang in JS_LANGUAGES:
                 result = jest_test_agent.repair(ctx)

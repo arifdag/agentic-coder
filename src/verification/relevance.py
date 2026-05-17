@@ -255,6 +255,90 @@ def _assertion_counts(tree: ast.AST) -> tuple[int, int]:
     )
 
 
+def _has_target_call_in_expr(
+    expr: ast.expr,
+    module_aliases: set[str],
+    imported_aliases: set[str],
+    targets: Iterable[str],
+) -> bool:
+    """Return True if *expr* contains a call to a target (direct or via module)."""
+    target_lowers = {t.lower() for t in targets}
+    imported_lowers = {a.lower() for a in imported_aliases}
+    module_lowers = {a.lower() for a in module_aliases}
+    for child in ast.walk(expr):
+        if isinstance(child, ast.Call):
+            func = child.func
+            if isinstance(func, ast.Name):
+                if func.id.lower() in (imported_lowers | target_lowers):
+                    return True
+            elif isinstance(func, ast.Attribute):
+                if func.attr.lower() in target_lowers:
+                    return True
+                if (
+                    isinstance(func.value, ast.Name)
+                    and func.value.id.lower() in module_lowers
+                    and func.attr.lower() in target_lowers
+                ):
+                    return True
+    return False
+
+
+def _expr_references_target_or_module(
+    expr: ast.expr,
+    module_aliases: set[str],
+    imported_aliases: set[str],
+    targets: Iterable[str],
+) -> bool:
+    """Return True if *expr* references a module alias, imported alias, or target name."""
+    target_lowers = {t.lower() for t in targets}
+    imported_lowers = {a.lower() for a in imported_aliases}
+    module_lowers = {a.lower() for a in module_aliases}
+    ref_names = module_lowers | imported_lowers | target_lowers
+    for child in ast.walk(expr):
+        if isinstance(child, ast.Name):
+            if child.id.lower() in ref_names:
+                return True
+        elif isinstance(child, ast.Attribute):
+            if child.attr.lower() in target_lowers:
+                return True
+            if isinstance(child.value, ast.Name) and child.value.id.lower() in module_lowers:
+                return True
+    return False
+
+
+def _generic_public_api_assertion_counts(
+    tree: ast.AST,
+    module_aliases: set[str],
+    imported_aliases: set[str],
+    targets: Iterable[str],
+) -> int:
+    """Count assertions that reference the target/module without calling it."""
+    count = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            if _has_target_call_in_expr(node.test, module_aliases, imported_aliases, targets):
+                continue
+            if _expr_references_target_or_module(
+                node.test, module_aliases, imported_aliases, targets
+            ):
+                count += 1
+        elif isinstance(node, ast.Call) and (
+            _is_unittest_assert_call(node) or _is_pytest_raises_call(node)
+        ):
+            args = node.args + [kw.value for kw in getattr(node, "keywords", [])]
+            if any(
+                _has_target_call_in_expr(arg, module_aliases, imported_aliases, targets)
+                for arg in args
+            ):
+                continue
+            if any(
+                _expr_references_target_or_module(arg, module_aliases, imported_aliases, targets)
+                for arg in args
+            ):
+                count += 1
+    return count
+
+
 def _call_target_signals(
     tree: ast.AST,
     targets: Iterable[str],
@@ -287,8 +371,6 @@ def _call_target_signals(
                 if func.attr.lower() in target_lowers:
                     module_call = True
                     instantiated_target = True
-            if func.attr.lower() in target_lowers:
-                direct_call = True
 
     return direct_call, module_call, instantiated_target
 
@@ -410,17 +492,26 @@ def analyze_relevance(
         "instantiates_target": instantiated_target,
         "asserts_target_or_source": asserts_target_or_source,
     }
+    generic_public_api_assertion_count = _generic_public_api_assertion_counts(
+        tree, module_aliases, imported_aliases, targets
+    )
+    has_call_or_instantiation = direct_call or module_call or instantiated_target
+
     negative_signals = {
         "no_test_functions": not test_names,
         "no_assertions": assertion_count == 0,
         "dummy_assertions_only": assertion_count > 0 and dummy_assertion_count == assertion_count,
         "target_redefined": target_redefined and not bool(imported_aliases),
+        "generic_public_api_gaming": (
+            bool(targets)
+            and not has_call_or_instantiation
+            and generic_public_api_assertion_count > 0
+        ),
     }
 
     strong_signal_count = sum(
         1
         for key in (
-            "imports_target_name",
             "calls_target_directly",
             "calls_target_via_module",
             "instantiates_target",
@@ -447,7 +538,8 @@ def analyze_relevance(
         balanced_wildcard_pass = (
             gate_policy == "balanced"
             and wildcard_imported
-            and (direct_call or module_call or instantiated_target or asserts_target_or_source)
+            and has_call_or_instantiation
+            and not negative_signals.get("generic_public_api_gaming", False)
             and not negative_signals.get("no_assertions", True)
             and not negative_signals.get("dummy_assertions_only", True)
             and not negative_signals.get("target_redefined", True)
@@ -458,6 +550,7 @@ def analyze_relevance(
         static_passed = (
             score >= max(1, int(min_relevance_signals))
             and strong_signal_count > 0
+            and has_call_or_instantiation
             and not any(negative_signals.values())
         ) or balanced_wildcard_pass
 
@@ -692,6 +785,7 @@ class RelevanceValidator:
     def _analysis_findings(self, analysis: RelevanceAnalysis) -> list[Finding]:
         findings: list[Finding] = []
         negatives = analysis.negative_signals
+        target = analysis.target
         if analysis.error == "empty_tests":
             findings.append(
                 Finding(
@@ -718,11 +812,16 @@ class RelevanceValidator:
                 )
             )
         if negatives.get("no_assertions"):
+            msg = (
+                f"Generated tests for '{target}' do not contain assertions or pytest.raises checks."
+                if target
+                else "Generated tests do not contain assertions or pytest.raises checks."
+            )
             findings.append(
                 Finding(
                     severity=Severity.ERROR,
                     code="no_assertions",
-                    message="Generated tests do not contain assertions or pytest.raises checks.",
+                    message=msg,
                     suggestion="Assert observable behavior of the original target.",
                 )
             )
@@ -747,19 +846,55 @@ class RelevanceValidator:
                     suggestion="Import and exercise the original target from source_module.",
                 )
             )
-        if not analysis.passed and not findings:
+        if negatives.get("generic_public_api_gaming"):
+            msg = (
+                f"Generated tests for '{target}' appear to be generic public API smoke tests "
+                f"(e.g., assert {self.source_module} is not None or dir({self.source_module}))."
+                if target
+                else "Generated tests appear to be generic public API smoke tests."
+            )
+            suggestion = (
+                f"Call or instantiate '{target}' from '{self.source_module}' in an assertion."
+                if target
+                else f"Call or instantiate the target from '{self.source_module}' in an assertion."
+            )
             findings.append(
                 Finding(
                     severity=Severity.ERROR,
-                    code="tests_unrelated_to_source",
-                    message=(
-                        "Generated tests do not provide strong evidence that they "
-                        "exercise the original target."
-                    ),
-                    suggestion=(
-                        f"Import the target from '{self.source_module}' and call it "
-                        "inside an assertion."
-                    ),
+                    code="generic_public_api_gaming",
+                    message=msg,
+                    suggestion=suggestion,
                 )
             )
+        if not analysis.passed and not findings:
+            if target:
+                findings.append(
+                    Finding(
+                        severity=Severity.ERROR,
+                        code="tests_unrelated_to_source",
+                        message=(
+                            f"Tests import {self.source_module} but never call target {target}; "
+                            f"rewrite to import {target} directly and assert on {target}(...)."
+                        ),
+                        suggestion=(
+                            f"Import '{target}' from '{self.source_module}' and call it "
+                            "inside an assertion."
+                        ),
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        severity=Severity.ERROR,
+                        code="tests_unrelated_to_source",
+                        message=(
+                            "Generated tests do not provide strong evidence that they "
+                            "exercise the original target."
+                        ),
+                        suggestion=(
+                            f"Import the target from '{self.source_module}' and call it "
+                            "inside an assertion."
+                        ),
+                    )
+                )
         return findings

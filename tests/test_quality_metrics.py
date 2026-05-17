@@ -58,6 +58,26 @@ def test_relevance_metrics_use_shared_signal_names_and_target_coverage():
     assert metrics["signals"]["imports_target_name"] is True
     assert metrics["target_line_coverage"] == 100.0
     assert metrics["relevance_pass"] is True
+    assert metrics["direct_target_relevance"] is True
+    assert metrics["target_coverage_relevance"] == 1.0
+
+
+def test_relevance_metrics_flag_generic_public_api_gaming():
+    source = "def add(a, b):\n    return a + b\n"
+    test = (
+        "import source_module\n\n"
+        "def test_public_api():\n"
+        "    assert source_module is not None\n"
+        "    assert hasattr(source_module, 'add')\n"
+    )
+
+    metrics = compute_relevance_metrics(test, source, passed=True)
+
+    assert metrics["relevance_pass"] is False
+    assert metrics["gaming_flag"] is True
+    assert metrics["generic_public_api_gaming"] is True
+    assert metrics["direct_target_relevance"] is False
+    assert metrics["indirect_target_relevance"] is False
 
 
 def test_structural_gaming_flag_does_not_depend_on_pipeline_pass():

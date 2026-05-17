@@ -38,6 +38,10 @@ class RepairContext(BaseModel):
     import_module: Optional[str] = Field(
         default=None, description="Real repo module path to import from when available"
     )
+    target_function: Optional[str] = Field(
+        default=None,
+        description="Specific function/class to target in tests when known",
+    )
 
 
 SYSTEM_PROMPT = """You are an expert Python test engineer. Your task is to generate high-quality pytest unit tests.
@@ -98,9 +102,14 @@ Requirements:
   - In repo-context runs where the prompt specifies a real module/package path,
     use that exact path, e.g. from mypackage.mymodule import target.
     Do NOT use source_module in repo-context; import the real module path instead.
+- If a target function/class is named in the context below, import that exact
+  target and make every test call or instantiate it. Do not test broad module
+  public API behavior instead of the named target.
 - Do NOT redefine targets locally; always import and delegate to the original.
 - Call or instantiate the target in assertions to exercise its logic and branches.
 - Every test must have meaningful assertions; never assert True, assert 1 == 1, or pass-only bodies.
+- Include at least one normal case, one edge case, and one invalid/error case
+  when the target behavior makes that possible.
 - Cover edge cases: empty inputs, None values, boundary values, and error paths.
 - Test expected exceptions with pytest.raises where applicable.
 - Use pytest.mark.parametrize for similar test cases.
@@ -164,6 +173,7 @@ Error encountered:
 {diagnostics_section}
 {coverage_section}
 {import_context_section}
+{target_function_section}
 
 Repair rules (apply all that match the diagnostics above):
 - relevance / tests_unrelated_to_source / target_not_relevant: The test does not
@@ -187,6 +197,18 @@ Repair rules (apply all that match the diagnostics above):
   target module. Check the import path: in single-file sandbox mode use
   source_module; in repo-context use the real module/package path from the prompt.
   Fix only the import path and test code, not the production source.
+- no_tests_collected: pytest collected no tests. Ensure the file defines
+  at least one test_* function or Test* class with test_* methods.
+  Do not hide tests inside invalid classes, conditionals, or helper functions.
+  Also check for syntax errors or import errors that prevent collection.
+- timeout / docker_timeout: The test execution timed out. Reduce the number
+  of test cases, remove randomized/stress/large-input tests, use tiny deterministic inputs,
+  avoid infinite or unbounded loops, and keep only targeted tests that call the requested target.
+- low target coverage: Some target lines were covered but coverage is low.
+  Add more targeted tests for uncovered branches and error-handling paths.
+- assertion_error / test_failure: A test assertion failed or raised an error.
+  Fix the assertion or the test logic. If the target function changed,
+  update the expected values to match the current behavior.
 - coverage gaps: Add tests that call the target on inputs reaching the uncovered lines.
 
 Target relevance and coverage rules (critical):
@@ -274,12 +296,14 @@ class UnitTestAgent:
         self,
         file_path: Optional[str] = None,
         import_module: Optional[str] = None,
+        target_function: Optional[str] = None,
     ) -> str:
         """Build context section for the prompt.
 
         Args:
             file_path: Optional file path for context
             import_module: Exact real module path for repo-context execution
+            target_function: Specific function/class to focus tests on
 
         Returns:
             Context section string
@@ -293,6 +317,18 @@ class UnitTestAgent:
                 f"Use this exact module path in imports, e.g. "
                 f"from {import_module} import <target>. "
                 "Do NOT import from source_module in repo-context runs."
+            )
+
+        if target_function:
+            import_path = import_module if import_module else "source_module"
+            sections.append(
+                f"Target function/class: {target_function}\n"
+                f"You MUST import {target_function} directly from {import_path} and "
+                "call or instantiate it inside every test.\n"
+                "Do NOT write broad module API smoke tests; focus every test on "
+                f"{target_function}.\n"
+                "Cover normal inputs, edge cases, and invalid-or-error inputs "
+                "where possible."
             )
 
         if file_path:
@@ -314,6 +350,7 @@ class UnitTestAgent:
         code: str,
         file_path: Optional[str] = None,
         import_module: Optional[str] = None,
+        target_function: Optional[str] = None,
     ) -> GeneratedTest:
         """Generate unit tests for the given code.
 
@@ -321,11 +358,12 @@ class UnitTestAgent:
             code: Source code to generate tests for
             file_path: Optional file path for import context
             import_module: Exact real module path for repo-context execution
+            target_function: Specific function/class to focus tests on
 
         Returns:
             Generated test result
         """
-        context_section = self._build_context_section(file_path, import_module)
+        context_section = self._build_context_section(file_path, import_module, target_function)
 
         prompt = GENERATION_TEMPLATE.format(
             code=code,
@@ -444,6 +482,19 @@ class UnitTestAgent:
                 f"- Example form: from {context.import_module} import <target>"
             )
 
+        target_function_section = ""
+        if context.target_function:
+            import_path = context.import_module if context.import_module else "source_module"
+            target_function_section = (
+                f"\nTarget function/class: {context.target_function}\n"
+                f"- You MUST import {context.target_function} directly from {import_path}.\n"
+                f"- Call or instantiate {context.target_function} inside every test assertion.\n"
+                "- Do NOT write broad module API smoke tests; focus every test on "
+                f"{context.target_function}.\n"
+                "- Cover normal inputs, edge cases, and invalid-or-error input cases "
+                "where possible."
+            )
+
         prompt = REPAIR_TEMPLATE.format(
             previous_code=context.previous_code,
             error_type=context.error_type,
@@ -453,6 +504,7 @@ class UnitTestAgent:
             diagnostics_section=diagnostics_section,
             coverage_section=coverage_section,
             import_context_section=import_context_section,
+            target_function_section=target_function_section,
         )
 
         messages = [

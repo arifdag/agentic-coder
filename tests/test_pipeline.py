@@ -257,6 +257,18 @@ These tests cover the basic functionality.
 
         assert "Module to import: source_module" in context
 
+    def test_generation_prompt_includes_exact_target_function(self):
+        llm = self.CapturingLLM()
+        agent = UnitTestAgent(llm)
+
+        agent.generate("def add(a, b):\n    return a + b\n", target_function="add")
+
+        prompt = llm.messages[-1].content
+        assert "Target function/class: add" in prompt
+        assert "import add directly from source_module" in prompt
+        assert "broad module API smoke tests" in prompt
+        assert "normal inputs, edge cases, and invalid-or-error inputs" in prompt
+
 
 class TestRepairContext:
     """Tests for RepairContext model."""
@@ -308,6 +320,23 @@ class TestRepairContext:
         assert "Import from: sklearn.preprocessing._label" in prompt
         assert "Do NOT use source_module in repo-context repairs" in prompt
         assert "from sklearn.preprocessing._label import <target>" in prompt
+
+    def test_repair_prompt_includes_target_function(self):
+        llm = TestUnitTestAgentParsing.CapturingLLM()
+        agent = UnitTestAgent(llm)
+        context = RepairContext(
+            previous_code="import source_module\n",
+            error_type="tests_unrelated_to_source",
+            error_message="never calls target",
+            target_function="add",
+        )
+
+        agent.repair(context)
+
+        prompt = llm.messages[-1].content
+        assert "Target function/class: add" in prompt
+        assert "import add directly from source_module" in prompt
+        assert "Call or instantiate add inside every test assertion" in prompt
 
 
 class TestIntegration:
@@ -414,3 +443,12 @@ class TestRepairPromptContent:
         assert "source_module" in text
         assert "body" in text or "executed" in text
         assert "not merely import" in text or "call" in text or "instantiate" in text
+
+    def test_repair_timeout_and_no_tests_collected_guidance(self):
+        text = REPAIR_TEMPLATE.lower()
+        assert "no_tests_collected" in text
+        assert "test_*" in text
+        assert "timeout" in text
+        assert "randomized" in text
+        assert "large-input" in text
+        assert "tiny deterministic inputs" in text
