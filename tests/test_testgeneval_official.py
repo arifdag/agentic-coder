@@ -186,8 +186,8 @@ def test_official_windowed_groups_by_image_and_deletes_after(monkeypatch, tmp_pa
     assert len(eval_cmds) == 2
     assert len(delete_cmds) == 2
     assert len(report_cmds) == 1
-    assert "kdjain/swe-bench-django__django-testbed:5.0" in result.counts["deleted_images"]
-    assert "kdjain/swe-bench-psf__requests-testbed:2.31" in result.counts["deleted_images"]
+    assert "kdjain/swe-bench-django_django-testbed:5.0" in result.counts["deleted_images"]
+    assert "kdjain/swe-bench-psf_requests-testbed:2.31" in result.counts["deleted_images"]
     assert all("--skip_mutation" in cmd for cmd in eval_cmds)
     assert all("2" == cmd[cmd.index("--num_processes") + 1] for cmd in eval_cmds)
     assert result.summary_copied is not None
@@ -197,7 +197,7 @@ def test_official_windowed_groups_by_image_and_deletes_after(monkeypatch, tmp_pa
 def test_official_windowed_image_name_uses_repo_and_version():
     task = {"repo": "django/django", "version": "5.0"}
 
-    assert _docker_image_for_task(task, "kdjain") == "kdjain/swe-bench-django__django-testbed:5.0"
+    assert _docker_image_for_task(task, "kdjain") == "kdjain/swe-bench-django_django-testbed:5.0"
 
 
 def test_official_bridge_omits_generation_failures_and_skips_eval(tmp_path):

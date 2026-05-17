@@ -477,7 +477,7 @@ def _write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
 
 def _docker_image_for_task(task: dict[str, Any], namespace: str) -> str:
     """Return the official TestGenEval Docker image name for a task record."""
-    repo = str(task.get("repo") or "").strip().replace("/", "__")
+    repo = str(task.get("repo") or "").strip().replace("/", "_")
     version = str(task.get("version") or "").strip()
     repo_slug = repo or "unknown"
     tag = version or "unknown"
