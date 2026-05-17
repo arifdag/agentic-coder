@@ -157,3 +157,122 @@ def test_benchmark_runner_bug_detection_uses_buggy_code(monkeypatch, tmp_path):
     assert result.bug_metrics["fixed_passed"] is True
     assert result.bug_metrics["buggy_failed"] is True
     assert result.bug_metrics["bug_detected"] is True
+
+
+def test_benchmark_runner_scores_dep_hallucination_by_gate_oracle(tmp_path):
+    config = SimpleNamespace(
+        evaluation=EvalConfig(quality_mode="off"),
+        sandbox=SimpleNamespace(),
+        pipeline=SimpleNamespace(max_retries=0),
+    )
+    dataset = SimpleNamespace(name="dep_hallucination", load=lambda: [])
+    runner = BenchmarkRunner(config=config, dataset=dataset, results_dir=str(tmp_path))
+    case = BenchmarkCase(
+        id="dep-phantom",
+        code="import fakepkg\n",
+        language="python",
+        metadata={"phantom_packages": ["fakepkg"]},
+    )
+    state = {
+        "status": "failed_after_retries",
+        "generated_tests": "",
+        "test_functions": [],
+        "verification_report": {
+            "gates": [
+                {
+                    "gate_name": "dependency",
+                    "passed": False,
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "code": "PHANTOM-PKG",
+                            "message": "Package 'fakepkg' not found on PyPI.",
+                        }
+                    ],
+                }
+            ]
+        },
+        "retry_count": 0,
+    }
+
+    result = runner._run_one(case, lambda **kwargs: state)
+
+    assert result.passed is True
+    assert result.pipeline_state["pipeline_passed"] is False
+    assert result.pipeline_state["benchmark_oracle"]["reason"] == "phantom_detected"
+
+
+def test_benchmark_runner_failed_only_reuses_passing_results(monkeypatch, tmp_path):
+    cases = [
+        BenchmarkCase(id="pass", code="def ok():\n    return 1\n", language="python"),
+        BenchmarkCase(id="fail", code="def bad():\n    return 0\n", language="python"),
+    ]
+    config = SimpleNamespace(
+        evaluation=EvalConfig(quality_mode="off"),
+        sandbox=SimpleNamespace(),
+        pipeline=SimpleNamespace(max_retries=0),
+    )
+    dataset = SimpleNamespace(name="resume", load=lambda: cases)
+    runner = BenchmarkRunner(config=config, dataset=dataset, results_dir=str(tmp_path))
+    (runner.results_dir / "pass.json").write_text(
+        EvalResult(case_id="pass", passed=True).model_dump_json(),
+        encoding="utf-8",
+    )
+    (runner.results_dir / "fail.json").write_text(
+        EvalResult(case_id="fail", passed=False).model_dump_json(),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_pipeline(**kwargs):
+        calls.append(kwargs["code"])
+        return {
+            "status": "success",
+            "generated_tests": "",
+            "test_functions": [],
+            "verification_report": {"gates": []},
+            "retry_count": 0,
+        }
+
+    monkeypatch.setattr("src.graph.pipeline.run_pipeline", fake_pipeline)
+
+    results = runner.run(failed_only=True)
+
+    assert [result.case_id for result in results] == ["pass", "fail"]
+    assert calls == [cases[1].code]
+    assert results[0].passed is True
+    assert results[1].passed is True
+
+
+def test_benchmark_runner_skips_mutation_when_relevance_fails(monkeypatch, tmp_path):
+    config = SimpleNamespace(
+        evaluation=EvalConfig(quality_mode="full"),
+        sandbox=SimpleNamespace(),
+        pipeline=SimpleNamespace(max_retries=0),
+    )
+    dataset = SimpleNamespace(name="fake", load=lambda: [])
+    runner = BenchmarkRunner(config=config, dataset=dataset, results_dir=str(tmp_path))
+    case = BenchmarkCase(
+        id="irrelevant",
+        code="def target():\n    return 1\n",
+        language="python",
+        metadata={"target": "target"},
+    )
+    state = {
+        "status": "success",
+        "generated_tests": "def test_smoke():\n    assert True\n",
+        "verification_report": {"gates": [{"gate_name": "sandbox", "passed": True}]},
+    }
+    monkeypatch.setattr(
+        "src.evaluation.runner.generate_python_mutants",
+        lambda source_code, limit: (_ for _ in ()).throw(AssertionError("mutation ran")),
+    )
+
+    payload = runner._build_quality_payload(
+        case, state, state["verification_report"]["gates"], 100.0
+    )
+
+    assert payload["mutation_metrics"] == {
+        "skipped": True,
+        "skip_reason": "relevance_failed",
+    }

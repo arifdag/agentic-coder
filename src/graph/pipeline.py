@@ -22,7 +22,7 @@ from ..agents.unit_test import RepairContext, UnitTestAgent
 from ..config import Config, get_role_llm
 from ..utils.logging import AuditLogger
 from ..verification.complexity import ComplexityValidator
-from ..verification.dependency import DependencyValidator
+from ..verification.dependency import DependencyValidator, extract_imports, extract_js_imports
 from ..verification.explanation_judge import ExplanationJudge
 from ..verification.js_sandbox import JsSandboxExecutor
 from ..verification.judge import SastJudge
@@ -34,6 +34,26 @@ from ..verification.sast import SastAnalyzer
 from ..verification.ui_sandbox import UITestExecutor
 
 JS_LANGUAGES = {Language.JAVASCRIPT.value, Language.TYPESCRIPT.value}
+
+
+def _dependency_finding_packages(gate: GateResult) -> set[str]:
+    """Extract package names from dependency-gate PHANTOM-PKG findings."""
+    import re
+
+    packages: set[str] = set()
+    for finding in gate.findings:
+        if finding.code != "PHANTOM-PKG":
+            continue
+        match = re.search(r"Package '([^']+)' not found", finding.message)
+        if match:
+            packages.add(match.group(1))
+    return packages
+
+
+def _import_names_for_language(code: str, language: str) -> set[str]:
+    if language in JS_LANGUAGES:
+        return extract_js_imports(code)
+    return extract_imports(code)
 
 
 class AuditEntry(BaseModel):
@@ -87,6 +107,9 @@ class PipelineState(TypedDict):
     execution_context: Optional[str]
     infrastructure_pass: Optional[bool]
     repo_setup_pass: Optional[bool]
+    source_phantom_import: bool
+    source_phantom_packages: List[str]
+    test_phantom_packages: List[str]
 
     # Legacy single-gate fields kept for CLI compatibility
     verification_result: Optional[dict]
@@ -322,6 +345,22 @@ def create_pipeline(config: Optional[Config] = None):
             dep_result = dep_future.result()
             rel_result = rel_future.result()
 
+        detected_phantoms = _dependency_finding_packages(dep_result)
+        source_phantoms = sorted(
+            detected_phantoms & _import_names_for_language(state["code_input"] or "", lang)
+        )
+        test_phantoms = sorted(
+            detected_phantoms & _import_names_for_language(test_code or "", lang)
+        )
+        if detected_phantoms:
+            extra_details = (
+                f"source_phantom_imports={source_phantoms}; "
+                f"test_phantom_imports={test_phantoms}"
+            )
+            dep_result.details = (
+                f"{dep_result.details}; {extra_details}" if dep_result.details else extra_details
+            )
+
         gate_results = [sast_result.model_dump(), dep_result.model_dump()]
         static_passed = sast_result.passed and dep_result.passed
         if rel_result is not None:
@@ -332,6 +371,9 @@ def create_pipeline(config: Optional[Config] = None):
             **state,
             "gate_results": gate_results,
             "verification_passed": static_passed,
+            "source_phantom_import": bool(source_phantoms),
+            "source_phantom_packages": source_phantoms,
+            "test_phantom_packages": test_phantoms,
             "status": "static_checked",
         }
 
@@ -535,6 +577,12 @@ def create_pipeline(config: Optional[Config] = None):
             if not error_type:
                 error_type = "verification_failed"
                 error_message = report.summary
+            if state.get("source_phantom_import"):
+                packages = ", ".join(state.get("source_phantom_packages") or [])
+                error_type = "source_phantom_import"
+                error_message = "Dependency gate detected phantom imports in the source code" + (
+                    f": {packages}" if packages else ""
+                )
 
         if state["audit_log"]:
             last = state["audit_log"][-1].copy()
@@ -706,6 +754,8 @@ def create_pipeline(config: Optional[Config] = None):
             return "output"
         if state.get("error_type") == "infrastructure_error":
             return "output"
+        if state.get("source_phantom_import"):
+            return "output"
         if state["retry_count"] >= state["max_retries"]:
             return "output"
         return "repair"
@@ -869,6 +919,9 @@ def run_pipeline(
         "execution_context": None,
         "infrastructure_pass": None,
         "repo_setup_pass": None,
+        "source_phantom_import": False,
+        "source_phantom_packages": [],
+        "test_phantom_packages": [],
         "retry_count": 0,
         "max_retries": max_retries,
         "error_type": None,

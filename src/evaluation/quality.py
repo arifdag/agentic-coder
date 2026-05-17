@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import re
 from typing import Any
 
 from ..verification.relevance import analyze_relevance, compute_target_coverage
@@ -191,6 +192,18 @@ def _gate_by_name(gate_results: list[dict], name: str) -> dict | None:
     return next((g for g in gate_results if g.get("gate_name") == name), None)
 
 
+def _dependency_finding_packages(dep_gate: dict | None) -> list[str]:
+    if not dep_gate:
+        return []
+    packages: list[str] = []
+    for finding in dep_gate.get("findings") or []:
+        message = str(finding.get("message") or "")
+        match = re.search(r"Package '([^']+)' not found", message)
+        if match:
+            packages.append(match.group(1))
+    return sorted(set(packages))
+
+
 def compute_gate_quality_metrics(
     gate_results: list[dict],
     metadata: dict | None = None,
@@ -211,6 +224,11 @@ def compute_gate_quality_metrics(
     expected_clean = bool(valid_packages) and not expected_phantom
     phantom_detected = bool(dep_gate and expected_phantom and not dep_gate.get("passed", True))
     clean_accepted = bool(dep_gate and expected_clean and dep_gate.get("passed", False))
+    detected_packages = _dependency_finding_packages(dep_gate)
+    missed_phantom_packages = sorted(set(phantom_packages) - set(detected_packages))
+    unexpected_dependency_findings = sorted(
+        package for package in detected_packages if package not in set(phantom_packages)
+    )
 
     return {
         "safety_metrics": {
@@ -224,6 +242,11 @@ def compute_gate_quality_metrics(
             "phantom_detected": phantom_detected,
             "clean_accepted": clean_accepted,
             "dependency_passed": None if dep_gate is None else bool(dep_gate.get("passed")),
+            "expected_phantom_packages": list(phantom_packages),
+            "valid_packages": list(valid_packages),
+            "detected_phantom_packages": detected_packages,
+            "missed_phantom_packages": missed_phantom_packages if expected_phantom else [],
+            "unexpected_dependency_findings": unexpected_dependency_findings,
         },
     }
 

@@ -184,6 +184,9 @@ import this_package_definitely_does_not_exist_xyzzy_12345
         result = validator.validate(combined)
         assert result.passed is False
         assert any("PHANTOM-PKG" == f.code for f in result.findings)
+        assert "imports=" in result.details
+        assert "phantom=" in result.details
+        assert "superturboparser_xyzzy_not_a_real_package" in result.details
 
 
 class TestSastAnalyzer:

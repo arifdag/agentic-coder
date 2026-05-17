@@ -499,6 +499,16 @@ DEFAULT_ALL_BENCHMARKS = [
     default=None,
     help="Pytest timeout in seconds for repo-context tests",
 )
+@click.option(
+    "--skip-existing",
+    is_flag=True,
+    help="Reuse existing per-case JSON results instead of rerunning them",
+)
+@click.option(
+    "--failed-only",
+    is_flag=True,
+    help="Rerun failed or missing cases while reusing existing passing results",
+)
 @click.option("--verbose", "-v", is_flag=True)
 def evaluate(
     benchmark,
@@ -510,6 +520,8 @@ def evaluate(
     repo_setup,
     gate_policy,
     repo_timeout,
+    skip_existing,
+    failed_only,
     verbose,
 ):
     """Run the pipeline against a benchmark dataset."""
@@ -541,7 +553,11 @@ def evaluate(
         console.print(f"\n[bold]Running benchmark: {name}[/bold]")
         ds = get_dataset(name, data_dir=Path(config.evaluation.data_dir))
         runner = BenchmarkRunner(config=config, dataset=ds, results_dir=results_dir)
-        runner.run(max_cases=max_cases)
+        runner.run(
+            max_cases=max_cases,
+            skip_existing=skip_existing,
+            failed_only=failed_only,
+        )
         runner.save_summary()
         metrics = runner.summarize()
         from rich.markdown import Markdown as RichMarkdown

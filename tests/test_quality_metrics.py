@@ -128,17 +128,28 @@ def test_target_coverage_matches_repo_source_file_path():
 def test_gate_quality_metrics_extract_safety_and_dependency_outcomes():
     gates = [
         {"gate_name": "sast", "passed": False},
-        {"gate_name": "dependency", "passed": False},
+        {
+            "gate_name": "dependency",
+            "passed": False,
+            "findings": [
+                {
+                    "code": "PHANTOM-PKG",
+                    "message": "Package 'fakepkg' not found on PyPI.",
+                }
+            ],
+        },
     ]
     metrics = compute_gate_quality_metrics(
         gates,
-        {"vuln": "sql-injection", "phantom_packages": ["fakepkg"]},
+        {"vuln": "sql-injection", "phantom_packages": ["fakepkg", "missedpkg"]},
     )
 
     assert metrics["safety_metrics"]["expected_vulnerable"] is True
     assert metrics["safety_metrics"]["vulnerability_detected"] is True
     assert metrics["dependency_metrics"]["expected_phantom"] is True
     assert metrics["dependency_metrics"]["phantom_detected"] is True
+    assert metrics["dependency_metrics"]["detected_phantom_packages"] == ["fakepkg"]
+    assert metrics["dependency_metrics"]["missed_phantom_packages"] == ["missedpkg"]
 
 
 def test_generate_python_mutants_is_bounded_and_deterministic():

@@ -539,6 +539,10 @@ class DependencyValidator:
             gate_name="dependency",
             passed=passed,
             findings=findings,
+            details=(
+                f"imports={sorted(imports)}; third_party={sorted(third_party)}; "
+                f"phantom={[f.message for f in findings if f.code == 'PHANTOM-PKG']}"
+            ),
         )
 
     def _validate_js(self, code: str) -> GateResult:
@@ -568,4 +572,8 @@ class DependencyValidator:
             gate_name="dependency",
             passed=passed,
             findings=findings,
+            details=(
+                f"imports={sorted(imports)}; third_party={sorted(third_party)}; "
+                f"phantom={[f.message for f in findings if f.code == 'PHANTOM-PKG']}"
+            ),
         )

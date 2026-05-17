@@ -12,6 +12,7 @@ from src.agents.unit_test import (
     RepairContext,
     UnitTestAgent,
 )
+from src.config import Config
 
 
 class TestRouterAgent:
@@ -360,6 +361,83 @@ def add(a: int, b: int) -> int:
 
         assert result["status"] in ["success", "failed_after_retries"]
         assert result["generated_tests"] is not None
+
+
+def test_pipeline_does_not_repair_source_only_phantom_import(monkeypatch, tmp_path):
+    from src.graph import pipeline as pipeline_module
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            return SimpleNamespace(
+                content=(
+                    "from source_module import target\n\n"
+                    "def test_target():\n"
+                    "    assert target() == 1\n"
+                )
+            )
+
+    class FakeSandboxExecutor:
+        def __init__(self, config):
+            self.config = config
+
+        def execute(self, source_code, test_code):
+            return SimpleNamespace(
+                success=True,
+                tests_run=1,
+                tests_passed=1,
+                tests_failed=0,
+                coverage=100.0,
+                branch_coverage=None,
+                coverage_data={
+                    "files": {
+                        "source_module.py": {
+                            "executed_lines": [2, 3],
+                            "executed_branches": [],
+                            "missing_branches": [],
+                        }
+                    }
+                },
+                coverage_gaps=None,
+                stdout="",
+                stderr="",
+                error_type=None,
+                error_message=None,
+                line_number=None,
+                infrastructure_pass=True,
+                repo_setup_pass=None,
+            )
+
+    fake_llm = FakeLLM()
+    monkeypatch.setattr(pipeline_module, "get_role_llm", lambda config, role: fake_llm)
+    monkeypatch.setattr(pipeline_module, "SandboxExecutor", FakeSandboxExecutor)
+    monkeypatch.setattr(
+        pipeline_module.DependencyValidator,
+        "_check_pypi",
+        lambda self, package: package != "phantom_source_pkg",
+    )
+
+    config = Config()
+    config.sast.enabled = False
+    config.judge.enabled = False
+    config.pipeline.audit_log_dir = str(tmp_path / "audit")
+
+    result = pipeline_module.run_pipeline(
+        code="import phantom_source_pkg\n\ndef target():\n    return 1\n",
+        user_request="Generate unit tests",
+        max_retries=3,
+        config=config,
+        target_function="target",
+    )
+
+    assert result["source_phantom_import"] is True
+    assert result["source_phantom_packages"] == ["phantom_source_pkg"]
+    assert result["error_type"] == "source_phantom_import"
+    assert result["retry_count"] == 0
+    assert fake_llm.calls == 1
 
 
 class TestGenerationPromptContent:

@@ -60,7 +60,13 @@ class BenchmarkRunner:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self._results: List[EvalResult] = []
 
-    def run(self, max_cases: Optional[int] = None) -> List[EvalResult]:
+    def run(
+        self,
+        max_cases: Optional[int] = None,
+        *,
+        skip_existing: bool = False,
+        failed_only: bool = False,
+    ) -> List[EvalResult]:
         from ..graph.pipeline import run_pipeline
 
         cases = self.dataset.load()
@@ -70,14 +76,64 @@ class BenchmarkRunner:
         log.info("Running %d cases from %s", len(cases), self.dataset.name)
 
         for i, case in enumerate(cases):
+            result_path = self.results_dir / f"{case.id}.json"
+            existing = self._load_existing_result(result_path)
+            if existing is not None and (skip_existing or (failed_only and existing.passed)):
+                log.info("[%d/%d] %s already has a result; reusing it", i + 1, len(cases), case.id)
+                self._results.append(existing)
+                continue
+
             log.info("[%d/%d] %s", i + 1, len(cases), case.id)
             result = self._run_one(case, run_pipeline)
             self._results.append(result)
 
-            result_path = self.results_dir / f"{case.id}.json"
             result_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
 
         return self._results
+
+    def _load_existing_result(self, path: Path) -> EvalResult | None:
+        if not path.is_file():
+            return None
+        try:
+            return EvalResult.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 - bad cache should not block reruns
+            log.warning("Ignoring unreadable existing result %s: %s", path, exc)
+            return None
+
+    def _benchmark_oracle_pass(
+        self,
+        case: BenchmarkCase,
+        gates: list[dict],
+        pipeline_passed: bool,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Apply benchmark-specific pass semantics when raw pipeline pass is misleading."""
+        if getattr(self.dataset, "name", None) != "dep_hallucination":
+            return pipeline_passed, None
+
+        dep_gate = next((g for g in gates if g.get("gate_name") == "dependency"), None)
+        dependency_passed = None if dep_gate is None else bool(dep_gate.get("passed"))
+        phantom_packages = case.metadata.get("phantom_packages") or []
+        valid_packages = case.metadata.get("valid_packages") or []
+        expected_phantom = bool(phantom_packages)
+        expected_clean = bool(valid_packages) and not expected_phantom
+        if expected_phantom:
+            passed = dependency_passed is False
+            reason = "phantom_detected" if passed else "phantom_missed"
+        elif expected_clean:
+            passed = dependency_passed is True
+            reason = "clean_accepted" if passed else "clean_rejected"
+        else:
+            passed = pipeline_passed
+            reason = "no_dependency_oracle"
+
+        return passed, {
+            "benchmark": "dep_hallucination",
+            "reason": reason,
+            "pipeline_passed": pipeline_passed,
+            "dependency_passed": dependency_passed,
+            "expected_phantom": expected_phantom,
+            "expected_clean": expected_clean,
+        }
 
     def _run_one(self, case: BenchmarkCase, run_pipeline_fn) -> EvalResult:
         start = time.time()
@@ -96,6 +152,12 @@ class BenchmarkRunner:
             report = state.get("verification_report") or {}
             gates = report.get("gates", [])
             coverage_val = report.get("coverage")
+            pipeline_passed = state.get("status") == "success"
+            benchmark_passed, benchmark_oracle = self._benchmark_oracle_pass(
+                case,
+                gates,
+                pipeline_passed,
+            )
 
             sb_run = state.get("sandbox_tests_run")
             sb_pass = state.get("sandbox_tests_passed")
@@ -129,7 +191,7 @@ class BenchmarkRunner:
 
             return EvalResult(
                 case_id=case.id,
-                passed=state.get("status") == "success",
+                passed=benchmark_passed,
                 elapsed_seconds=round(elapsed, 2),
                 tests_run=tests_run,
                 tests_passed=tests_passed,
@@ -142,6 +204,8 @@ class BenchmarkRunner:
                     "language": state.get("language"),
                     "error_type": state.get("error_type"),
                     "error_message": state.get("error_message"),
+                    "pipeline_passed": pipeline_passed,
+                    "benchmark_oracle": benchmark_oracle,
                 },
                 execution_metrics=execution_metrics,
                 **quality_payload,
@@ -194,14 +258,28 @@ class BenchmarkRunner:
             (bool(g.get("passed")) for g in gates if g.get("gate_name") == "sandbox"),
             passed,
         )
+        relevance_metrics = compute_relevance_metrics(
+            test_code,
+            case.code,
+            case.metadata,
+            passed=sandbox_passed,
+            coverage_data=state.get("sandbox_coverage_data"),
+            source_file_path=source_file_path,
+        )
         mutation_metrics: dict[str, Any] = {}
         if mode == "full" and case.language.lower() == "python":
-            limit = getattr(self.config.evaluation, "mutation_max_mutants", 25)
-            mutants = generate_python_mutants(case.code, limit=limit)
-            if passed and test_code and mutants:
-                mutation_metrics = self._run_mutation_metrics(mutants, test_code)
+            if not passed:
+                mutation_metrics = {"skipped": True, "skip_reason": "pipeline_failed"}
+            elif not sandbox_passed:
+                mutation_metrics = {"skipped": True, "skip_reason": "sandbox_failed"}
+            elif not relevance_metrics.get("relevance_pass", False):
+                mutation_metrics = {"skipped": True, "skip_reason": "relevance_failed"}
+            elif not test_code:
+                mutation_metrics = {"skipped": True, "skip_reason": "no_tests"}
             else:
-                mutation_metrics = compute_mutation_summary(mutants)
+                limit = getattr(self.config.evaluation, "mutation_max_mutants", 25)
+                mutants = generate_python_mutants(case.code, limit=limit)
+                mutation_metrics = self._run_mutation_metrics(mutants, test_code)
 
         reliability_metrics: dict[str, Any] = {}
         repeats = getattr(self.config.evaluation, "reliability_repeats", 0)
@@ -224,14 +302,7 @@ class BenchmarkRunner:
             "mutation_metrics": mutation_metrics,
             "reliability_metrics": reliability_metrics,
             "oracle_metrics": compute_oracle_metrics(test_code),
-            "relevance_metrics": compute_relevance_metrics(
-                test_code,
-                case.code,
-                case.metadata,
-                passed=sandbox_passed,
-                coverage_data=state.get("sandbox_coverage_data"),
-                source_file_path=source_file_path,
-            ),
+            "relevance_metrics": relevance_metrics,
             "safety_metrics": gate_metrics["safety_metrics"],
             "dependency_metrics": gate_metrics["dependency_metrics"],
             "bug_metrics": bug_metrics,
