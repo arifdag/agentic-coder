@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from src.evaluation.models import BenchmarkCase
 from src.evaluation.testgeneval_official import (
+    _docker_image_for_task,
     run_official_bridge,
+    run_official_bridge_windowed,
     validate_official_prediction,
     wrap_django_official_prediction,
 )
@@ -50,6 +53,27 @@ def _valid_prediction() -> str:
         "from django.example import target\n\n"
         "def test_target_returns_one():\n"
         "    assert target() == 1\n"
+    )
+
+
+def _window_case(row_id: str, instance_id: str, repo: str, version: str) -> BenchmarkCase:
+    return BenchmarkCase(
+        id=f"testgeneval_lite-{instance_id}",
+        code="def target():\n    return 1\n",
+        language="python",
+        metadata={
+            "id": row_id,
+            "instance_id": instance_id,
+            "repo": repo,
+            "version": version,
+            "base_commit": "abc123",
+            "code_file": "django/example.py",
+            "test_file": "tests/test_example.py",
+            "preds_context": {"code_src": "def target():\n    return 1\n", "last": ""},
+            "test_patch": "",
+            "patch": "",
+            "baseline_covs": {},
+        },
     )
 
 
@@ -110,6 +134,70 @@ def test_official_bridge_writes_prediction_jsonl_and_manifest(monkeypatch, tmp_p
     assert result.summary_copied is not None
     assert result.report_copied is not None
     assert len(calls) == 2
+
+
+def test_official_windowed_groups_by_image_and_deletes_after(monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+    cases = [
+        _window_case("row-1", "django__django-1", "django/django", "5.0"),
+        _window_case("row-2", "django__django-2", "django/django", "5.0"),
+        _window_case("row-3", "psf__requests-1", "psf/requests", "2.31"),
+    ]
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "generate_report.py" in cmd:
+            output_arg = cmd[cmd.index("--output_dir") + 1]
+            out_dir = Path(output_arg.rstrip("/"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "llm-agent-gdr_summary.json").write_text(
+                json.dumps({"full_pass_at_1": 1.0}),
+                encoding="utf-8",
+            )
+            (out_dir / "llm-agent-gdr_report.json").write_text(
+                json.dumps({"with_logs": ["row-1", "row-2", "row-3"]}),
+                encoding="utf-8",
+            )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = run_official_bridge_windowed(
+        benchmark="testgeneval_lite",
+        cases=cases,
+        output_dir=tmp_path / "out",
+        model_name="llm-agent-gdr",
+        official_repo_dir=_official_repo(tmp_path),
+        namespace="kdjain",
+        window_images=1,
+        num_processes_per_image=2,
+        delete_images_after=True,
+        skip_mutation=True,
+        generate=lambda case: _valid_prediction(),
+    )
+
+    eval_cmds = [cmd for cmd in calls if "run_evaluation.py" in cmd]
+    delete_cmds = [cmd for cmd in calls if cmd[:3] == ["docker", "image", "rm"]]
+    report_cmds = [cmd for cmd in calls if "generate_report.py" in cmd]
+
+    assert result.counts["image_count"] == 2
+    assert result.counts["window_count"] == 2
+    assert [window["prediction_count"] for window in result.counts["windows"]] == [2, 1]
+    assert len(eval_cmds) == 2
+    assert len(delete_cmds) == 2
+    assert len(report_cmds) == 1
+    assert "kdjain/swe-bench-django__django-testbed:5.0" in result.counts["deleted_images"]
+    assert "kdjain/swe-bench-psf__requests-testbed:2.31" in result.counts["deleted_images"]
+    assert all("--skip_mutation" in cmd for cmd in eval_cmds)
+    assert all("2" == cmd[cmd.index("--num_processes") + 1] for cmd in eval_cmds)
+    assert result.summary_copied is not None
+    assert result.report_copied is not None
+
+
+def test_official_windowed_image_name_uses_repo_and_version():
+    task = {"repo": "django/django", "version": "5.0"}
+
+    assert _docker_image_for_task(task, "kdjain") == "kdjain/swe-bench-django__django-testbed:5.0"
 
 
 def test_official_bridge_omits_generation_failures_and_skips_eval(tmp_path):

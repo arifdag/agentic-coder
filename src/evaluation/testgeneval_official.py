@@ -468,6 +468,47 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def _write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _docker_image_for_task(task: dict[str, Any], namespace: str) -> str:
+    """Return the official TestGenEval Docker image name for a task record."""
+    repo = str(task.get("repo") or "").strip().replace("/", "__")
+    version = str(task.get("version") or "").strip()
+    repo_slug = repo or "unknown"
+    tag = version or "unknown"
+    return f"{namespace}/swe-bench-{repo_slug}-testbed:{tag}"
+
+
+def _prediction_task_pairs(
+    predictions_path: Path,
+    tasks_path: Path,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Pair prediction records with matching official task records by id."""
+    tasks_by_id = {task.get("id"): task for task in _read_jsonl(tasks_path)}
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for prediction in _read_jsonl(predictions_path):
+        task = tasks_by_id.get(prediction.get("id"))
+        if task is not None:
+            pairs.append((prediction, task))
+    return pairs
+
+
+def _group_pairs_by_image(
+    pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]],
+    namespace: str,
+) -> dict[str, list[tuple[dict[str, Any], dict[str, Any]]]]:
+    groups: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for prediction, task in pairs:
+        image = _docker_image_for_task(task, namespace)
+        groups.setdefault(image, []).append((prediction, task))
+    return groups
+
+
 def _existing_generation_counts(predictions_path: Path, manifest_path: Path) -> dict[str, int]:
     """Summarize already-generated official predictions for scorer-only reruns."""
     written = len(_read_jsonl(predictions_path)) if predictions_path.is_file() else 0
@@ -838,6 +879,253 @@ def run_official_bridge(
 
     if eval_rc != 0:
         result.errors.append("Evaluation subprocess failed; report may be incomplete.")
+    if report_rc != 0:
+        result.errors.append("Report subprocess failed.")
+
+    return result
+
+
+def run_official_bridge_windowed(
+    benchmark: str,
+    cases: Iterable[BenchmarkCase],
+    output_dir: Path,
+    model_name: str,
+    official_repo_dir: Path,
+    *,
+    namespace: str = "kdjain",
+    timeout: int = 900,
+    window_images: int = 1,
+    num_processes_per_image: int = 2,
+    delete_images_after: bool = False,
+    skip_mutation: bool = False,
+    skip_existing: bool = True,
+    max_cases: Optional[int] = None,
+    generate: Callable[[BenchmarkCase], str],
+    validate_prediction: Optional[Callable[[str], str]] = validate_official_prediction,
+    reuse_predictions: bool = False,
+) -> OfficialBridgeResult:
+    """Run official TestGenEval evaluation in Docker-image windows.
+
+    The function writes the same full predictions/tasks artifacts as
+    ``run_official_bridge``. It then groups generated predictions by the Docker
+    image required by each task, evaluates one window of images at a time, and
+    finally runs the official report over the aggregate logs.
+    """
+    if benchmark not in DATASET_IDS:
+        raise ValueError(f"Unknown benchmark '{benchmark}'. Choose from: {', '.join(DATASET_IDS)}")
+    if "/" in model_name or "\\" in model_name:
+        raise ValueError(
+            "model_name must not contain path separators because the official "
+            "TestGenEval report script uses it in output filenames"
+        )
+
+    window_images = max(1, int(window_images))
+    num_processes_per_image = max(1, int(num_processes_per_image))
+
+    official_repo_dir = official_repo_dir.resolve()
+    output_dir = output_dir.resolve()
+    _validate_official_repo(official_repo_dir)
+
+    bench_out = output_dir / benchmark
+    bench_out.mkdir(parents=True, exist_ok=True)
+
+    predictions_path = bench_out / "predictions.jsonl"
+    tasks_path = bench_out / "official_tasks.jsonl"
+    manifest_path = bench_out / "generation_manifest.json"
+    official_logs_dir = bench_out / "official_logs"
+    official_reports_dir = bench_out / "official_reports"
+    windows_dir = bench_out / "windows"
+    official_logs_dir.mkdir(parents=True, exist_ok=True)
+    official_reports_dir.mkdir(parents=True, exist_ok=True)
+    windows_dir.mkdir(parents=True, exist_ok=True)
+    eval_logs_dir = official_logs_dir
+    if _needs_docker_safe_path(official_logs_dir):
+        eval_logs_dir = _staging_logs_dir_for(official_logs_dir, benchmark)
+        eval_logs_dir.mkdir(parents=True, exist_ok=True)
+
+    result = OfficialBridgeResult(
+        predictions_path=predictions_path,
+        tasks_path=tasks_path,
+        manifest_path=manifest_path,
+        official_logs_dir=official_logs_dir,
+        official_reports_dir=official_reports_dir,
+        staging_logs_dir=eval_logs_dir if eval_logs_dir != official_logs_dir else None,
+    )
+
+    if reuse_predictions:
+        missing = [str(path) for path in (predictions_path, tasks_path) if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "Cannot reuse official TestGenEval predictions; missing files: "
+                + ", ".join(missing)
+            )
+        result.counts = _existing_generation_counts(predictions_path, manifest_path)
+        written = result.counts["written"]
+        log.info("Reusing %d existing predictions from %s", written, predictions_path)
+    else:
+        written, failed, manifest = _write_predictions_jsonl(
+            predictions_path,
+            tasks_path,
+            cases,
+            model_name,
+            generate,
+            max_cases,
+            validate_prediction,
+        )
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result.counts = {
+            "written": written,
+            "failed": failed,
+            "total_attempted": written + failed,
+        }
+        log.info(
+            "Wrote %d predictions (%d failed) to %s",
+            written,
+            failed,
+            predictions_path,
+        )
+
+    if result.staging_logs_dir:
+        result.counts["staging_logs_used"] = True
+
+    if not written:
+        result.errors.append("No predictions were written; official evaluation was skipped.")
+        return result
+
+    pairs = _prediction_task_pairs(predictions_path, tasks_path)
+    image_groups = _group_pairs_by_image(pairs, namespace)
+    image_items = list(image_groups.items())
+    result.counts.update(
+        {
+            "image_count": len(image_items),
+            "window_images": window_images,
+            "num_processes_per_image": num_processes_per_image,
+            "delete_images_after": delete_images_after,
+            "window_count": 0,
+            "windows": [],
+            "images": [image for image, _pairs in image_items],
+        }
+    )
+
+    eval_failures = 0
+    deleted_images: list[str] = []
+    for start in range(0, len(image_items), window_images):
+        window_number = len(result.counts["windows"]) + 1
+        selected = image_items[start : start + window_images]
+        window_pairs = [pair for _image, group_pairs in selected for pair in group_pairs]
+        window_prediction_records = [prediction for prediction, _task in window_pairs]
+        window_task_records = [task for _prediction, task in window_pairs]
+        window_dir = windows_dir / f"window_{window_number:03d}"
+        window_predictions_path = window_dir / "predictions.jsonl"
+        window_tasks_path = window_dir / "official_tasks.jsonl"
+        _write_jsonl(window_predictions_path, window_prediction_records)
+        _write_jsonl(window_tasks_path, window_task_records)
+
+        images = [image for image, _group_pairs in selected]
+        num_processes = num_processes_per_image * max(1, len(images))
+        result.counts["windows"].append(
+            {
+                "index": window_number,
+                "images": images,
+                "prediction_count": len(window_prediction_records),
+                "predictions_path": str(window_predictions_path),
+                "tasks_path": str(window_tasks_path),
+                "num_processes": num_processes,
+            }
+        )
+
+        eval_cmd: List[str] = [
+            sys.executable,
+            "run_evaluation.py",
+            "--predictions_path",
+            _official_path_arg(window_predictions_path),
+            "--swe_bench_tasks",
+            _official_path_arg(window_tasks_path),
+            "--namespace",
+            namespace,
+            "--timeout",
+            str(timeout),
+            "--num_processes",
+            str(num_processes),
+            "--log_dir",
+            _official_dir_arg(eval_logs_dir),
+        ]
+        if skip_mutation:
+            eval_cmd.append("--skip_mutation")
+        if skip_existing:
+            eval_cmd.append("--skip_existing")
+
+        eval_rc = _run_subprocess(
+            eval_cmd,
+            official_repo_dir,
+            result,
+            f"evaluation window {window_number}",
+        )
+        if eval_rc != 0:
+            eval_failures += 1
+
+        if delete_images_after:
+            for image in images:
+                delete_rc = _run_subprocess(
+                    ["docker", "image", "rm", image],
+                    official_repo_dir,
+                    result,
+                    f"delete image {image}",
+                )
+                if delete_rc == 0:
+                    deleted_images.append(image)
+
+    result.counts["window_count"] = len(result.counts["windows"])
+    if deleted_images:
+        result.counts["deleted_images"] = deleted_images
+
+    report_cmd: List[str] = [
+        sys.executable,
+        "generate_report.py",
+        "--predictions_path",
+        _official_path_arg(predictions_path),
+        "--swe_bench_tasks",
+        _official_path_arg(tasks_path),
+        "--log_dir",
+        _official_dir_arg(eval_logs_dir),
+        "--output_dir",
+        _official_dir_arg(official_reports_dir),
+    ]
+
+    error_start = len(result.errors)
+    report_rc = _run_subprocess(report_cmd, official_repo_dir, result, "report")
+
+    if report_rc != 0:
+        try:
+            fallback_ok = _write_fallback_report_outputs(
+                official_repo_dir,
+                predictions_path,
+                tasks_path,
+                eval_logs_dir,
+                official_reports_dir,
+                model_name,
+            )
+        except Exception as exc:  # noqa: BLE001 - fallback should report, not crash
+            fallback_ok = False
+            result.errors.append(f"fallback report generation failed: {exc}")
+        if fallback_ok:
+            report_rc = 0
+            del result.errors[error_start:]
+            result.counts["report_fallback_used"] = True
+
+    result.summary_copied, result.report_copied = _copy_report_outputs(
+        official_reports_dir,
+        bench_out,
+        model_name,
+    )
+    if result.staging_logs_dir:
+        _copy_tree_contents(eval_logs_dir, official_logs_dir)
+
+    if eval_failures:
+        result.errors.append("One or more evaluation windows failed; report may be incomplete.")
     if report_rc != 0:
         result.errors.append("Report subprocess failed.")
 

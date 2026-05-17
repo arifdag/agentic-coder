@@ -705,6 +705,185 @@ def testgeneval_official(
         sys.exit(1)
 
 
+@cli.command(name="testgeneval-windowed")
+@click.option(
+    "--benchmark",
+    "-b",
+    type=click.Choice(["testgeneval_lite", "testgeneval"]),
+    default="testgeneval_lite",
+    show_default=True,
+    help="TestGenEval dataset variant to score with the official Docker runner",
+)
+@click.option("--max-cases", "-n", type=int, default=None, help="Max cases to generate")
+@click.option("--output-dir", "-o", type=str, default=None, help="Results directory")
+@click.option(
+    "--provider",
+    default=None,
+    help="Override coding provider. Leave unset to use CODING_PROVIDER from .env.",
+)
+@click.option(
+    "--model-name",
+    default="llm-agent-gdr",
+    show_default=True,
+    help="Model name written into the official TestGenEval predictions JSONL",
+)
+@click.option(
+    "--official-repo-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to a cloned facebookresearch/testgeneval repository",
+)
+@click.option(
+    "--namespace",
+    default=None,
+    help="Docker image namespace used by the official TestGenEval runner",
+)
+@click.option("--timeout", type=int, default=None, help="Official per-instance timeout")
+@click.option(
+    "--window-images",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of unique Docker images to evaluate in each window",
+)
+@click.option(
+    "--num-processes-per-image",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Official runner processes to allocate per image in a window",
+)
+@click.option("--delete-images-after", is_flag=True, help="Delete each image after its window")
+@click.option("--skip-mutation", is_flag=True, help="Skip official mutation testing")
+@click.option(
+    "--no-skip-existing",
+    is_flag=True,
+    help="Re-run official evaluation even when logs already exist",
+)
+@click.option(
+    "--reuse-predictions",
+    is_flag=True,
+    help="Reuse existing predictions.jsonl/official_tasks.jsonl and rerun official scoring only",
+)
+@click.option("--verbose", "-v", is_flag=True)
+def testgeneval_windowed(
+    benchmark,
+    max_cases,
+    output_dir,
+    provider,
+    model_name,
+    official_repo_dir,
+    namespace,
+    timeout,
+    window_images,
+    num_processes_per_image,
+    delete_images_after,
+    skip_mutation,
+    no_skip_existing,
+    reuse_predictions,
+    verbose,
+):
+    """Score official TestGenEval in Docker image windows."""
+    import json
+
+    from .agents.unit_test import UnitTestAgent
+    from .config import Config, get_role_llm
+    from .evaluation.benchmarks import get_dataset
+    from .evaluation.testgeneval_official import (
+        run_official_bridge_windowed,
+        validate_official_prediction,
+    )
+
+    config = Config.load(provider=provider)
+    config.pipeline.verbose = verbose
+
+    repo_dir = official_repo_dir or (
+        Path(config.evaluation.testgeneval_repo_dir)
+        if config.evaluation.testgeneval_repo_dir
+        else None
+    )
+    if repo_dir is None:
+        console.print(
+            "[red]Missing official TestGenEval repo path.[/red]\n"
+            "Pass --official-repo-dir or set TESTGENEVAL_REPO_DIR."
+        )
+        sys.exit(1)
+
+    effective_output_dir = Path(output_dir or config.evaluation.results_dir)
+    effective_namespace = namespace or config.evaluation.testgeneval_namespace
+    effective_timeout = timeout or config.evaluation.testgeneval_timeout
+    effective_skip_mutation = skip_mutation or config.evaluation.testgeneval_skip_mutation
+
+    if reuse_predictions:
+        cases = []
+
+        def generate_case(case):
+            raise RuntimeError("generation disabled by --reuse-predictions")
+
+        console.print(f"[bold]Reusing predictions for windowed {benchmark}[/bold]")
+    else:
+        dataset = get_dataset(benchmark, data_dir=Path(config.evaluation.data_dir))
+        cases = dataset.load()
+        llm = get_role_llm(config, "coding")
+        agent = UnitTestAgent(llm)
+
+        def generate_case(case):
+            if verbose:
+                console.print(f"[dim]Generating official prediction for {case.id}[/dim]")
+            return _generate_official_testgeneval_prediction(agent, case)
+
+        console.print(f"[bold]Generating predictions for windowed {benchmark}[/bold]")
+
+    try:
+        result = run_official_bridge_windowed(
+            benchmark=benchmark,
+            cases=cases,
+            output_dir=effective_output_dir,
+            model_name=model_name,
+            official_repo_dir=repo_dir,
+            namespace=effective_namespace,
+            timeout=effective_timeout,
+            window_images=window_images,
+            num_processes_per_image=num_processes_per_image,
+            delete_images_after=delete_images_after,
+            skip_mutation=effective_skip_mutation,
+            skip_existing=not no_skip_existing,
+            max_cases=max_cases,
+            generate=generate_case,
+            validate_prediction=lambda code: validate_official_prediction(
+                code,
+                allow_test_classes=True,
+            ),
+            reuse_predictions=reuse_predictions,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Official TestGenEval setup error:[/red] {exc}")
+        sys.exit(1)
+
+    result_path = result.predictions_path.parent / "official_bridge_windowed_result.json"
+    result_path.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
+
+    console.print("[green]Windowed official TestGenEval bridge completed.[/green]")
+    console.print(f"Predictions: {result.predictions_path}")
+    console.print(f"Manifest: {result.manifest_path}")
+    console.print(f"Bridge result: {result_path}")
+    console.print(f"Official logs: {result.official_logs_dir}")
+    console.print(f"Official reports: {result.official_reports_dir}")
+    console.print(
+        f"Predictions written: {result.counts.get('written', 0)}; "
+        f"generation failures: {result.counts.get('failed', 0)}; "
+        f"images: {result.counts.get('image_count', 0)}; "
+        f"windows: {result.counts.get('window_count', 0)}"
+    )
+    if result.returncodes:
+        console.print(f"Official subprocess return codes: {result.returncodes}")
+    if result.errors:
+        console.print("[yellow]Windowed bridge completed with errors:[/yellow]")
+        for error in result.errors:
+            console.print(f"- {error}")
+        sys.exit(1)
+
+
 @cli.command()
 @click.option("--benchmark", "-b", type=click.Choice(BENCHMARK_CHOICES), required=True)
 @click.option("--max-cases", "-n", type=int, default=None)
