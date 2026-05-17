@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,6 +24,13 @@ if str(ROOT) not in sys.path:
 from src.config import SandboxConfig  # noqa: E402
 from src.evaluation.benchmarks import get_dataset  # noqa: E402
 from src.evaluation.models import EvalMetrics, EvalResult  # noqa: E402
+from src.evaluation.quality import (  # noqa: E402
+    compute_coverage_metrics,
+    compute_mutation_summary,
+    compute_oracle_metrics,
+    compute_relevance_metrics,
+    generate_python_mutants,
+)
 from src.verification.sandbox import SandboxExecutor  # noqa: E402
 
 
@@ -48,7 +56,107 @@ def _timeout_text(value) -> str:
     return str(value)
 
 
-def _run_case(case, sandbox_config: SandboxConfig, seconds: int) -> EvalResult:
+def _build_quality_payload(
+    quality: str,
+    case,
+    test_code: str,
+    sandbox_result,
+    mutation_max_mutants: int = 25,
+    sandbox_config: SandboxConfig | None = None,
+) -> dict[str, Any]:
+    """Build quality metrics dict matching BenchmarkRunner EvalResult fields."""
+    if quality == "off":
+        return {}
+
+    source_code = case.code
+    metadata = case.metadata if hasattr(case, "metadata") else {}
+
+    coverage_data = None
+    line_coverage = None
+    branch_coverage = None
+    if sandbox_result is not None:
+        coverage_data = getattr(sandbox_result, "coverage_data", None)
+        line_coverage = getattr(sandbox_result, "coverage", None)
+        branch_coverage = getattr(sandbox_result, "branch_coverage", None)
+
+    coverage_metrics = compute_coverage_metrics(
+        coverage_data=coverage_data,
+        source_code=source_code,
+        metadata=metadata,
+        line_coverage=line_coverage,
+        source_file_path=metadata.get("target_file") or metadata.get("code_file"),
+    )
+    if branch_coverage is not None:
+        coverage_metrics.setdefault("branch_coverage", branch_coverage)
+        coverage_metrics.setdefault("target_branch_coverage", branch_coverage)
+
+    oracle_metrics = compute_oracle_metrics(test_code)
+
+    passed = sandbox_result.success if sandbox_result else False
+    relevance_metrics = compute_relevance_metrics(
+        test_code=test_code,
+        source_code=source_code,
+        metadata=metadata,
+        passed=passed,
+        coverage_data=coverage_data,
+        source_file_path=metadata.get("target_file") or metadata.get("code_file"),
+    )
+
+    payload = {
+        "coverage_metrics": coverage_metrics,
+        "oracle_metrics": oracle_metrics,
+        "relevance_metrics": relevance_metrics,
+    }
+
+    if quality == "full":
+        mutation_metrics = {}
+        case_language = getattr(case, "language", "python") or "python"
+        if case_language.lower() == "python":
+            mutants = generate_python_mutants(source_code, limit=mutation_max_mutants)
+            if passed and test_code and mutants:
+                mutation_metrics = _run_mutation_metrics(mutants, test_code, sandbox_config)
+            else:
+                mutation_metrics = compute_mutation_summary(mutants)
+        payload["mutation_metrics"] = mutation_metrics
+
+    return payload
+
+
+def _run_mutation_metrics(
+    mutants: list[dict[str, Any]],
+    test_code: str,
+    sandbox_config: SandboxConfig | None = None,
+) -> dict[str, Any]:
+    """Run generated tests against each mutant; True = killed."""
+    if sandbox_config is None:
+        sandbox_config = SandboxConfig.from_env()
+    outcomes = []
+    errors = []
+    executor = SandboxExecutor(sandbox_config)
+    for mutant in mutants:
+        source = mutant.get("source_code")
+        if not isinstance(source, str):
+            errors.append(f"{mutant.get('id', '<unknown>')}: missing source")
+            continue
+        try:
+            result = executor.execute(source_code=source, test_code=test_code)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{mutant.get('id', '<unknown>')}: {exc}")
+            continue
+        outcomes.append(not result.success)
+    summary = compute_mutation_summary(mutants, outcomes)
+    if errors:
+        summary["errors"] = errors
+    return summary
+
+
+def _run_case(
+    case,
+    sandbox_config: SandboxConfig,
+    seconds: int,
+    quality: str = "off",
+    mutation_max_mutants: int = 25,
+) -> EvalResult:
     start = time.time()
     if case.language != "python":
         return EvalResult(case_id=case.id, error="Pynguin baseline supports Python only")
@@ -119,13 +227,36 @@ def _run_case(case, sandbox_config: SandboxConfig, seconds: int) -> EvalResult:
 
         sandbox = SandboxExecutor(sandbox_config)
         result = sandbox.execute(source_code=case.code, test_code=test_code)
-        return EvalResult(
+
+        eval_kwargs = dict(
             case_id=case.id,
             passed=result.success,
             elapsed_seconds=round(time.time() - start, 2),
             tests_run=result.tests_run,
             tests_passed=result.tests_passed,
             coverage=result.coverage,
+        )
+
+        if quality != "off" and test_code.strip():
+            quality_payload = _build_quality_payload(
+                quality=quality,
+                case=case,
+                test_code=test_code,
+                sandbox_result=result,
+                mutation_max_mutants=mutation_max_mutants,
+                sandbox_config=sandbox_config,
+            )
+            for key in (
+                "coverage_metrics",
+                "oracle_metrics",
+                "relevance_metrics",
+                "mutation_metrics",
+            ):
+                if key in quality_payload:
+                    eval_kwargs[key] = quality_payload[key]
+
+        return EvalResult(
+            **eval_kwargs,
             pipeline_state={
                 "baseline": "pynguin",
                 "returncode": returncode,
@@ -136,13 +267,25 @@ def _run_case(case, sandbox_config: SandboxConfig, seconds: int) -> EvalResult:
         )
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", default="testgeneval_lite")
     parser.add_argument("--max-cases", type=int, default=10)
     parser.add_argument("--data-dir", default="data/benchmarks")
     parser.add_argument("--output-dir", default="eval_results_pynguin")
     parser.add_argument("--seconds", type=int, default=30)
+    parser.add_argument(
+        "--quality",
+        choices=["off", "fast", "full"],
+        default="off",
+        help="Quality metrics mode: off (no extra metrics), fast (coverage+oracle+relevance), full (fast + mutation testing)",
+    )
+    parser.add_argument(
+        "--mutation-max-mutants",
+        type=int,
+        default=25,
+        help="Upper bound on mutants generated in full quality mode (default: 25)",
+    )
     args = parser.parse_args()
 
     dataset = get_dataset(args.benchmark, data_dir=Path(args.data_dir))
@@ -151,9 +294,15 @@ def main() -> int:
     result_dir.mkdir(parents=True, exist_ok=True)
     sandbox_config = SandboxConfig.from_env()
 
-    results: list[EvalResult] = []
+    results = []
     for case in cases:
-        result = _run_case(case, sandbox_config, args.seconds)
+        result = _run_case(
+            case,
+            sandbox_config,
+            args.seconds,
+            quality=args.quality,
+            mutation_max_mutants=args.mutation_max_mutants,
+        )
         results.append(result)
         (result_dir / f"{case.id}.json").write_text(
             result.model_dump_json(indent=2),
