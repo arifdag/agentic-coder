@@ -10,6 +10,7 @@ import ast
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -335,7 +336,8 @@ def _write_predictions_jsonl(
             official_id = case.metadata.get("id") or case.id
             instance_id = case.metadata.get("instance_id") or official_id
             task_file.write(
-                json.dumps(_official_task_record(case, official_id, instance_id)) + "\n"
+                json.dumps(_official_task_record(case, official_id, instance_id), ensure_ascii=True)
+                + "\n"
             )
             entry: dict = {
                 "case_index": i,
@@ -354,7 +356,7 @@ def _write_predictions_jsonl(
                     "model_name_or_path": model_name,
                     "preds": {"full": [test_code]},
                 }
-                pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                pred_file.write(json.dumps(record, ensure_ascii=True) + "\n")
                 written += 1
             except Exception as exc:
                 failed += 1
@@ -397,6 +399,9 @@ def _run_subprocess(
     label: str,
 ) -> int:
     log.info("Running %s: %s", label, " ".join(cmd))
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         proc = subprocess.run(
             cmd,
@@ -405,6 +410,7 @@ def _run_subprocess(
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
     except Exception as exc:
         result.errors.append(f"{label} subprocess failed to start: {exc}")
@@ -472,7 +478,7 @@ def _write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
 def _docker_image_for_task(task: dict[str, Any], namespace: str) -> str:

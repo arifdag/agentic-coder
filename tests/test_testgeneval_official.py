@@ -138,14 +138,17 @@ def test_official_bridge_writes_prediction_jsonl_and_manifest(monkeypatch, tmp_p
 
 def test_official_windowed_groups_by_image_and_deletes_after(monkeypatch, tmp_path):
     calls: list[list[str]] = []
+    run_kwargs: list[dict] = []
     cases = [
         _window_case("row-1", "django__django-1", "django/django", "5.0"),
         _window_case("row-2", "django__django-2", "django/django", "5.0"),
         _window_case("row-3", "psf__requests-1", "psf/requests", "2.31"),
     ]
+    cases[0].metadata["patch"] = "contains Windows-hostile unicode: \u201d"
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
+        run_kwargs.append(kwargs)
         if "generate_report.py" in cmd:
             output_arg = cmd[cmd.index("--output_dir") + 1]
             out_dir = Path(output_arg.rstrip("/"))
@@ -190,6 +193,10 @@ def test_official_windowed_groups_by_image_and_deletes_after(monkeypatch, tmp_pa
     assert "kdjain/swe-bench-psf_requests-testbed:2.31" in result.counts["deleted_images"]
     assert all("--skip_mutation" in cmd for cmd in eval_cmds)
     assert all("2" == cmd[cmd.index("--num_processes") + 1] for cmd in eval_cmds)
+    assert all(kwargs["env"]["PYTHONUTF8"] == "1" for kwargs in run_kwargs)
+    staged_tasks = Path(result.counts["windows"][0]["tasks_path"]).read_text(encoding="utf-8")
+    assert "\\u201d" in staged_tasks
+    assert "\u201d" not in staged_tasks
     assert result.summary_copied is not None
     assert result.report_copied is not None
 
