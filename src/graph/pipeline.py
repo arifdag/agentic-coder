@@ -6,7 +6,9 @@ Phase 4: Code explanation with LLM-as-judge and AST complexity validation.
 Phase 5: Multi-language support (JS/TS via Jest).
 """
 
+import ast
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import List, Literal, Optional, TypedDict
@@ -54,6 +56,152 @@ def _import_names_for_language(code: str, language: str) -> set[str]:
     if language in JS_LANGUAGES:
         return extract_js_imports(code)
     return extract_imports(code)
+
+
+def _pytest_test_names(code: str) -> List[str]:
+    return re.findall(r"def\s+(test_\w+)\s*\(", code or "")
+
+
+def _has_pytest_tests(code: str) -> bool:
+    return bool(_pytest_test_names(code))
+
+
+def _safe_test_name(name: str) -> str:
+    safe = re.sub(r"\W+", "_", name).strip("_").lower()
+    return safe or "target"
+
+
+def _arg_value_expr(arg: ast.arg) -> str:
+    name = arg.arg.lower()
+    annotation = ""
+    if arg.annotation is not None:
+        try:
+            annotation = ast.unparse(arg.annotation).lower()
+        except Exception:  # noqa: BLE001 - best-effort fallback generation
+            annotation = ""
+
+    hint = f"{name} {annotation}"
+    if any(token in hint for token in ("list", "tuple", "items", "values", "nums", "array")):
+        return "[]"
+    if any(token in hint for token in ("dict", "map", "mapping")):
+        return "{}"
+    if any(token in hint for token in ("str", "name", "text", "path", "key")):
+        return "''"
+    if any(token in hint for token in ("bool", "flag", "enabled", "is_", "has_")):
+        return "False"
+    if any(token in hint for token in ("float", "ratio", "percent")):
+        return "0.0"
+    return "0"
+
+
+def _required_call_args(args: ast.arguments, *, skip_first: bool = False) -> List[str]:
+    positional = list(args.posonlyargs) + list(args.args)
+    if skip_first and positional:
+        positional = positional[1:]
+
+    required_positional = positional[: max(0, len(positional) - len(args.defaults))]
+    call_args = [_arg_value_expr(arg) for arg in required_positional]
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+        if default is None:
+            call_args.append(f"{arg.arg}={_arg_value_expr(arg)}")
+    return call_args
+
+
+def _target_call_shape(source_code: str, target_function: str) -> tuple[str, List[str]]:
+    try:
+        tree = ast.parse(source_code or "")
+    except SyntaxError:
+        return "function", []
+
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == target_function
+        ):
+            return "function", _required_call_args(node.args)
+        if isinstance(node, ast.ClassDef) and node.name == target_function:
+            init = next(
+                (
+                    item
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef) and item.name == "__init__"
+                ),
+                None,
+            )
+            if init is None:
+                return "class", []
+            return "class", _required_call_args(init.args, skip_first=True)
+    return "function", []
+
+
+def _repair_fallback_test_code(
+    source_code: str,
+    target_function: Optional[str],
+    import_module: Optional[str] = None,
+) -> Optional[str]:
+    if not target_function or not re.match(r"^[A-Za-z_]\w*$", target_function):
+        return None
+
+    kind, call_args = _target_call_shape(source_code, target_function)
+    call = f"{target_function}({', '.join(call_args)})"
+    test_name = _safe_test_name(target_function)
+    import_path = import_module or "source_module"
+    lines = [f"from {import_path} import {target_function}", ""]
+    if kind == "class":
+        lines.extend(
+            [
+                f"def test_{test_name}_repair_scaffold_instantiates_target():",
+                f"    instance = {call}",
+                f"    assert isinstance(instance, {target_function})",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"def test_{test_name}_repair_scaffold_calls_target():",
+                f"    result = {call}",
+                "    assert result is not None",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _repair_mode_from_report(
+    report: Optional[VerificationReport], error_type: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    codes = {error_type} if error_type else set()
+    if report:
+        for gate in report.gates:
+            for finding in gate.findings:
+                if finding.code:
+                    codes.add(finding.code)
+
+    if codes & {"no_tests_collected", "no_test_functions", "empty_tests"}:
+        return (
+            "no_tests_collected",
+            "Discard the previous structure and emit top-level def test_* functions that import and call the target.",
+        )
+    if "generic_public_api_gaming" in codes:
+        return (
+            "generic_public_api_gaming",
+            "Delete broad module API smoke checks and assert directly on calls to the requested target.",
+        )
+    if "target_not_executed" in codes:
+        return (
+            "target_line_coverage_zero",
+            "Every test must directly call or instantiate the target so coverage executes target lines.",
+        )
+    if codes & {"assertion_error", "test_failure"}:
+        return (
+            "assertion_failure",
+            "Preserve passing target-focused tests; remove or correct only failing assumptions and never blank the file.",
+        )
+    if "tests_unrelated_to_source" in codes:
+        return (
+            "tests_unrelated_to_source",
+            "Rewrite tests to import the target directly and assert on target calls.",
+        )
+    return None, None
 
 
 class AuditEntry(BaseModel):
@@ -606,10 +754,15 @@ def create_pipeline(config: Optional[Config] = None):
         task_type = state.get("task_type", TaskType.UNIT_TEST.value)
 
         report_data = state.get("verification_report")
+        report = None
         diagnostics = None
         if report_data:
             report = VerificationReport(**report_data)
             diagnostics = report.format_for_repair()
+        repair_mode, diagnostic_note = _repair_mode_from_report(
+            report,
+            state.get("error_type"),
+        )
 
         if task_type == TaskType.EXPLANATION.value:
             expl_dict = state.get("generated_explanation") or {}
@@ -679,24 +832,48 @@ def create_pipeline(config: Optional[Config] = None):
                 diagnostics=diagnostics,
                 import_module=repo_meta.get("import_module"),
                 target_function=state.get("target_function"),
+                repair_mode=repair_mode,
+                diagnostic_note=diagnostic_note,
             )
             if lang in JS_LANGUAGES:
                 result = jest_test_agent.repair(ctx)
             else:
                 result = unit_test_agent.repair(ctx)
 
+        result_code = result.test_code
+        result_functions = result.test_functions
+        fallback_used = False
+        if (
+            task_type == TaskType.UNIT_TEST.value
+            and lang not in JS_LANGUAGES
+            and not _has_pytest_tests(result_code)
+        ):
+            fallback_code = _repair_fallback_test_code(
+                state.get("code_input") or "",
+                state.get("target_function"),
+                (state.get("repo_metadata") or {}).get("import_module"),
+            )
+            if fallback_code:
+                result_code = fallback_code
+                result_functions = _pytest_test_names(fallback_code)
+                fallback_used = True
+
         new_retry = state["retry_count"] + 1
+        repair_payload = ctx.model_dump()
+        if fallback_used:
+            repair_payload["fallback_used"] = True
+            repair_payload["fallback_reason"] = "repair_returned_no_pytest_tests"
         audit_entry = AuditEntry(
             iteration=new_retry + 1,
             timestamp=datetime.now().isoformat(),
-            generated_artifact=result.test_code,
-            repair_context=ctx.model_dump(),
+            generated_artifact=result_code,
+            repair_context=repair_payload,
         )
 
         return {
             **state,
-            "generated_tests": result.test_code,
-            "test_functions": result.test_functions,
+            "generated_tests": result_code,
+            "test_functions": result_functions,
             "retry_count": new_retry,
             "gate_results": None,
             "verification_report": None,

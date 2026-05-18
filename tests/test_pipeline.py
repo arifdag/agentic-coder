@@ -339,6 +339,29 @@ class TestRepairContext:
         assert "import add directly from source_module" in prompt
         assert "Call or instantiate add inside every test assertion" in prompt
 
+    def test_repair_prompt_includes_selected_no_tests_mode(self):
+        llm = TestUnitTestAgentParsing.CapturingLLM()
+        agent = UnitTestAgent(llm)
+        context = RepairContext(
+            previous_code="",
+            error_type="no_tests_collected",
+            error_message="collected 0 items",
+            target_function="add",
+            repair_mode="no_tests_collected",
+            diagnostic_note=(
+                "Discard the previous structure and emit top-level def test_* "
+                "functions that import and call the target."
+            ),
+        )
+
+        agent.repair(context)
+
+        prompt = llm.messages[-1].content
+        assert "Selected repair mode" in prompt
+        assert "Mode: no_tests_collected" in prompt
+        assert "Discard the previous structure" in prompt
+        assert "top-level def test_*" in prompt
+
 
 class TestIntegration:
     """Integration tests (require API key to run)."""
@@ -440,6 +463,97 @@ def test_pipeline_does_not_repair_source_only_phantom_import(monkeypatch, tmp_pa
     assert fake_llm.calls == 1
 
 
+def test_pipeline_repair_empty_output_falls_back_to_target_scaffold(monkeypatch, tmp_path):
+    from src.graph import pipeline as pipeline_module
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                content = (
+                    "from source_module import add\n\n"
+                    "def test_add_bad_expectation():\n"
+                    "    assert add(1, 2) == 4\n"
+                )
+            else:
+                content = ""
+            return SimpleNamespace(content=content)
+
+    class FakeSandboxExecutor:
+        calls = []
+
+        def __init__(self, config):
+            self.config = config
+
+        def execute(self, source_code, test_code):
+            self.__class__.calls.append(test_code)
+            if len(self.__class__.calls) == 1:
+                return SimpleNamespace(
+                    success=False,
+                    tests_run=1,
+                    tests_passed=0,
+                    tests_failed=1,
+                    coverage=100.0,
+                    branch_coverage=None,
+                    coverage_data=None,
+                    coverage_gaps=None,
+                    stdout="FAILED test_generated.py::test_add_bad_expectation",
+                    stderr="",
+                    error_type="test_failure",
+                    error_message="FAILED test_generated.py::test_add_bad_expectation",
+                    line_number=None,
+                    infrastructure_pass=True,
+                    repo_setup_pass=None,
+                )
+            return SimpleNamespace(
+                success=True,
+                tests_run=1,
+                tests_passed=1,
+                tests_failed=0,
+                coverage=100.0,
+                branch_coverage=None,
+                coverage_data=None,
+                coverage_gaps=None,
+                stdout="1 passed",
+                stderr="",
+                error_type=None,
+                error_message=None,
+                line_number=None,
+                infrastructure_pass=True,
+                repo_setup_pass=None,
+            )
+
+    fake_llm = FakeLLM()
+    FakeSandboxExecutor.calls = []
+    monkeypatch.setattr(pipeline_module, "get_role_llm", lambda config, role: fake_llm)
+    monkeypatch.setattr(pipeline_module, "SandboxExecutor", FakeSandboxExecutor)
+
+    config = Config()
+    config.sast.enabled = False
+    config.dependency.enabled = False
+    config.judge.enabled = False
+    config.pipeline.audit_log_dir = str(tmp_path / "audit")
+
+    result = pipeline_module.run_pipeline(
+        code="def add(a, b):\n    return a + b\n",
+        user_request="Generate unit tests",
+        max_retries=1,
+        config=config,
+        target_function="add",
+    )
+
+    repaired_code = FakeSandboxExecutor.calls[-1]
+    assert result["retry_count"] == 1
+    assert "from source_module import add" in repaired_code
+    assert "def test_add_repair_scaffold_calls_target" in repaired_code
+    assert "result = add(0, 0)" in repaired_code
+    assert result["test_functions"] == ["test_add_repair_scaffold_calls_target"]
+    assert result["audit_log"][-1]["repair_context"]["fallback_used"] is True
+
+
 class TestGenerationPromptContent:
     """Verify that SYSTEM_PROMPT and GENERATION_TEMPLATE include all critical guidance."""
 
@@ -526,7 +640,22 @@ class TestRepairPromptContent:
         text = REPAIR_TEMPLATE.lower()
         assert "no_tests_collected" in text
         assert "test_*" in text
+        assert "top-level" in text
+        assert "discard the previous" in text
         assert "timeout" in text
         assert "randomized" in text
         assert "large-input" in text
         assert "tiny deterministic inputs" in text
+
+    def test_repair_prompt_forbids_empty_repair_output(self):
+        text = REPAIR_TEMPLATE.lower()
+        assert "never return blank output" in text
+        assert "helper-only code" in text
+        assert "without pytest-discoverable test_* functions" in text
+
+    def test_repair_prompt_blocks_generic_public_api_gaming(self):
+        text = REPAIR_TEMPLATE.lower()
+        assert "generic_public_api_gaming" in text
+        assert "broad module api smoke" in text
+        assert "assert directly" in text
+        assert "requested target" in text

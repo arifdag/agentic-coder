@@ -42,6 +42,14 @@ class RepairContext(BaseModel):
         default=None,
         description="Specific function/class to target in tests when known",
     )
+    repair_mode: Optional[str] = Field(
+        default=None,
+        description="Specific repair branch selected from verification failures",
+    )
+    diagnostic_note: Optional[str] = Field(
+        default=None,
+        description="Compact actionable note for the selected repair branch",
+    )
 
 
 SYSTEM_PROMPT = """You are an expert Python test engineer. Your task is to generate high-quality pytest unit tests.
@@ -174,6 +182,7 @@ Error encountered:
 {coverage_section}
 {import_context_section}
 {target_function_section}
+{repair_mode_section}
 
 Repair rules (apply all that match the diagnostics above):
 - relevance / tests_unrelated_to_source / target_not_relevant: The test does not
@@ -189,6 +198,9 @@ Repair rules (apply all that match the diagnostics above):
 - dummy_assertions_only: Tests contain only vacuous assertions (assert True,
   assert 1 == 1, etc.). Replace every dummy assertion with a real assertion that
   verifies target behavior.
+- generic_public_api_gaming: Tests only inspect module shape or public API
+  availability. Delete broad module API smoke tests and assert directly on
+  calls to the requested target.
 - PHANTOM-PKG / dependency failure: An import refers to a package not found on PyPI.
   Do NOT invent packages or add fictitious dependencies. Keep imports to the real
   target module and fix only the test code import paths and assertions. If a
@@ -198,8 +210,9 @@ Repair rules (apply all that match the diagnostics above):
   source_module; in repo-context use the real module/package path from the prompt.
   Fix only the import path and test code, not the production source.
 - no_tests_collected: pytest collected no tests. Ensure the file defines
-  at least one test_* function or Test* class with test_* methods.
-  Do not hide tests inside invalid classes, conditionals, or helper functions.
+  at least one top-level test_* function. Discard the previous test-file
+  structure if necessary and rebuild a minimal target-focused pytest file.
+  Do not hide tests inside classes, conditionals, nested functions, or helpers.
   Also check for syntax errors or import errors that prevent collection.
 - timeout / docker_timeout: The test execution timed out. Reduce the number
   of test cases, remove randomized/stress/large-input tests, use tiny deterministic inputs,
@@ -207,8 +220,8 @@ Repair rules (apply all that match the diagnostics above):
 - low target coverage: Some target lines were covered but coverage is low.
   Add more targeted tests for uncovered branches and error-handling paths.
 - assertion_error / test_failure: A test assertion failed or raised an error.
-  Fix the assertion or the test logic. If the target function changed,
-  update the expected values to match the current behavior.
+  Do not return an empty file. Preserve passing target-focused tests, remove
+  only invalid assumptions, and fix expected values to match current behavior.
 - coverage gaps: Add tests that call the target on inputs reaching the uncovered lines.
 
 Target relevance and coverage rules (critical):
@@ -218,6 +231,8 @@ Target relevance and coverage rules (critical):
 - Do NOT write tests that only check importability; they must exercise target logic.
 - Do NOT replace meaningful assertions with dummy assertions during repair.
 - Never re-implement the source module target locally in the test file.
+- NEVER return blank output, prose, markdown-only text, helper-only code, or a
+  file without pytest-discoverable test_* functions.
 
 Return ONLY the corrected Python test code without any explanations or markdown."""
 
@@ -495,6 +510,15 @@ class UnitTestAgent:
                 "where possible."
             )
 
+        repair_mode_section = ""
+        if context.repair_mode or context.diagnostic_note:
+            parts = ["\nSelected repair mode:"]
+            if context.repair_mode:
+                parts.append(f"- Mode: {context.repair_mode}")
+            if context.diagnostic_note:
+                parts.append(f"- Action: {context.diagnostic_note}")
+            repair_mode_section = "\n".join(parts)
+
         prompt = REPAIR_TEMPLATE.format(
             previous_code=context.previous_code,
             error_type=context.error_type,
@@ -505,6 +529,7 @@ class UnitTestAgent:
             coverage_section=coverage_section,
             import_context_section=import_context_section,
             target_function_section=target_function_section,
+            repair_mode_section=repair_mode_section,
         )
 
         messages = [

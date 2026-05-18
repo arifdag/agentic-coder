@@ -218,11 +218,48 @@ class SandboxExecutor:
 
         if not result["error_type"] and result["tests_failed"] > 0:
             result["error_type"] = "test_failure"
-            fail_match = re.search(r"FAILED (.+)", stdout)
-            if fail_match:
-                result["error_message"] = f"Test failed: {fail_match.group(1)}"
-            else:
-                result["error_message"] = f"{result['tests_failed']} test(s) failed"
+            summary_lines = re.findall(r"^FAILED\s+(.+)$", stdout, re.MULTILINE)
+            failed_ids: list[str] = []
+            for line in summary_lines:
+                test_id = line.split()[0].strip()
+                if test_id and test_id not in failed_ids:
+                    failed_ids.append(test_id)
+
+            progress_ids = re.findall(
+                r"^(test_[^\s]+::[^\s]+)\s+FAILED(?:\s|\[)",
+                stdout,
+                re.MULTILINE,
+            )
+            for test_id in progress_ids:
+                if test_id not in failed_ids:
+                    failed_ids.append(test_id)
+
+            failure_lines = summary_lines[:3]
+            if not failure_lines:
+                failures_section = re.search(
+                    r"={3,}\s*FAILURES\s*={3,}\n(.*?)(?:\n={3,}|$)",
+                    stdout,
+                    re.DOTALL,
+                )
+                if failures_section:
+                    failure_lines = [
+                        line.strip()
+                        for line in failures_section.group(1).splitlines()
+                        if line.strip()
+                        and not line.strip().startswith("_")
+                        and not line.strip().startswith("-")
+                    ][:8]
+
+            parts = []
+            if failed_ids:
+                parts.append("Failed tests: " + ", ".join(failed_ids[:5]))
+            if failure_lines:
+                detail = "\n".join(failure_lines)
+                parts.append(detail[:700])
+
+            result["error_message"] = (
+                "\n".join(parts) if parts else f"{result['tests_failed']} test(s) failed"
+            )
 
         return result
 

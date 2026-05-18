@@ -6,6 +6,7 @@ from src.verification.dependency import DependencyValidator, extract_imports
 from src.verification.models import Finding, GateResult, JudgeVerdict, Severity, VerificationReport
 from src.verification.relevance import RelevanceValidator
 from src.verification.repo_context import RepoContextExecutor, _module_from_path
+from src.verification.sandbox import SandboxExecutor
 from src.verification.sast import SastAnalyzer
 
 
@@ -343,6 +344,52 @@ class TestSandboxFixImports:
         code = "def broken(:\n    pass\n"
         fixed = self._fix(code)
         assert "from source_module import *" in fixed
+
+
+class TestSandboxPytestOutputParsing:
+    """Regression tests for repair-facing sandbox diagnostics."""
+
+    def test_test_failure_message_includes_failing_test_not_progress_marker(self):
+        stdout = """
+============================= test session starts ==============================
+collecting ... collected 2 items
+
+test_generated.py::test_add_ok PASSED                                    [ 50%]
+test_generated.py::test_add_bad FAILED                                   [100%]
+
+=================================== FAILURES ===================================
+_________________________________ test_add_bad __________________________________
+test_generated.py:6: in test_add_bad
+    with pytest.raises(ValueError):
+E   Failed: DID NOT RAISE <class 'ValueError'>
+=========================== short test summary info ============================
+FAILED test_generated.py::test_add_bad - Failed: DID NOT RAISE <class 'ValueError'>
+========================= 1 failed, 1 passed in 0.10s ==========================
+"""
+
+        parsed = SandboxExecutor()._parse_pytest_output(stdout, "")
+
+        assert parsed["error_type"] == "test_failure"
+        assert parsed["tests_run"] == 2
+        assert parsed["tests_failed"] == 1
+        assert "test_generated.py::test_add_bad" in parsed["error_message"]
+        assert "DID NOT RAISE" in parsed["error_message"]
+        assert "[100%]" not in parsed["error_message"]
+
+    def test_no_tests_collected_remains_first_class_failure(self):
+        stdout = """
+============================= test session starts ==============================
+collecting ... collected 0 items
+
+Coverage JSON written to file coverage.json
+============================ no tests ran in 0.30s =============================
+"""
+
+        parsed = SandboxExecutor()._parse_pytest_output(stdout, "")
+
+        assert parsed["error_type"] == "no_tests_collected"
+        assert parsed["tests_run"] == 0
+        assert parsed["error_message"]
 
 
 class TestRepoContextExecutor:
