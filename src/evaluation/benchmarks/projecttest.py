@@ -91,6 +91,68 @@ class ProjectTestDataset:
         return names
 
     @staticmethod
+    def _ordered_public_python_targets(text: str) -> list[str]:
+        """Return top-level functions/classes in source order.
+
+        ProjectTest repo-context prompts import from a real module path. When
+        the flattened prompt includes helper files before that module, target
+        inference can otherwise choose a helper symbol that is not importable
+        from the selected module.
+        """
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return []
+
+        targets: list[str] = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if not node.name.startswith("_"):
+                    targets.append(node.name)
+        return targets
+
+    @classmethod
+    def _target_for_python_file(
+        cls, rel_path: str, files: list, project_name: str
+    ) -> Optional[str]:
+        """Pick a public target defined by ``rel_path`` from rewritten files."""
+        entry = next((item for item in files if item[0] == rel_path), None)
+        if entry is None:
+            return None
+
+        names = cls._ordered_public_python_targets(entry[2])
+        if not names:
+            return None
+
+        stem = Path(rel_path).stem.lower()
+        project = project_name.lower().replace("-", "_")
+        for name in names:
+            lowered = name.lower()
+            if lowered == stem or lowered == project:
+                return name
+        return names[0]
+
+    @staticmethod
+    def _ordered_public_javascript_targets(text: str) -> list[str]:
+        """Return likely callable/class exports in source order."""
+        patterns = (
+            r"\bclass\s+([A-Za-z_$][\w$]*)",
+            r"\bfunction\s+([A-Za-z_$][\w$]*)",
+            r"\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+        )
+        matches: list[tuple[int, str]] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                matches.append((match.start(), match.group(1)))
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for _, name in sorted(matches, key=lambda item: item[0]):
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+        return ordered
+
+    @staticmethod
     def _module_level_reads(text: str) -> Set[str]:
         """Collect every Name that's *read* anywhere in the file.
 
@@ -737,6 +799,13 @@ class ProjectTestDataset:
                         import_module = self._import_module_from_target(target_file)
                         if import_module:
                             metadata["import_module"] = import_module
+                        target_name = self._target_for_python_file(
+                            target_candidates[0],
+                            body_files + init_files,
+                            project_dir.name,
+                        )
+                        if target_name:
+                            metadata["target_function"] = target_name
                     dep_files = (
                         list(project_dir.rglob("requirements*.txt"))
                         + list(project_dir.rglob("setup.py"))
@@ -746,6 +815,10 @@ class ProjectTestDataset:
                         str(f.relative_to(repo_root).as_posix()) for f in dep_files
                     ]
                     metadata["flattened_source_available"] = True
+                elif lang_name == "javascript":
+                    js_targets = self._ordered_public_javascript_targets(combined)
+                    if js_targets:
+                        metadata["target_function"] = js_targets[0]
 
                 cases.append(
                     BenchmarkCase(

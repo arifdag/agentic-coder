@@ -248,6 +248,11 @@ def _repair_mode_from_report(
             "assertion_failure",
             "Preserve passing target-focused tests; remove or correct only failing assumptions and never blank the file.",
         )
+    if "syntax_error" in codes:
+        return (
+            "syntax_error",
+            "Rebuild a small syntactically valid test file; avoid multiline test names and huge generated suites.",
+        )
     if "tests_unrelated_to_source" in codes:
         return (
             "tests_unrelated_to_source",
@@ -437,6 +442,7 @@ def create_pipeline(config: Optional[Config] = None):
                 result = jest_test_agent.generate(
                     code=state["code_input"],
                     file_path=state.get("file_path"),
+                    target_function=state.get("target_function"),
                 )
             else:
                 repo_meta = state.get("repo_metadata") or {}

@@ -285,6 +285,77 @@ def test_add():
             result.passed is True or len(blocking) == 0
         ), "assert-only test code should not fail the SAST gate"
 
+    def test_builtin_security_patterns_catch_python_benchmark_misses(self):
+        analyzer = SastAnalyzer(timeout=1, bandit_enabled=False)
+        cases = {
+            "CWE-89": (
+                "def get_user(username):\n"
+                '    query = "SELECT * FROM users WHERE name = \'" + username + "\'"\n'
+                "    return conn.execute(query).fetchall()\n"
+            ),
+            "CWE-78": (
+                "import subprocess\n"
+                "def ping_host(host):\n"
+                '    return subprocess.check_output("ping " + host, shell=True)\n'
+            ),
+            "CWE-798": 'API_KEY = "sk-live-ABC123secretKEY456"\n',
+            "CWE-601": (
+                "def redirect_url(target):\n"
+                '    return f"HTTP/1.1 302 Found\\r\\nLocation: {target}\\r\\n\\r\\n"\n'
+            ),
+            "CWE-22": (
+                "import os\n"
+                "def read_file(filename):\n"
+                '    base = "/var/www/uploads"\n'
+                "    path = os.path.join(base, filename)\n"
+                "    with open(path) as f:\n"
+                "        return f.read()\n"
+            ),
+            "CWE-79": ("def render_greeting(name):\n" '    return f"<h1>Hello, {name}!</h1>"\n'),
+            "CWE-502": (
+                "import pickle\n"
+                "def load_data(raw_bytes):\n"
+                "    return pickle.loads(raw_bytes)\n"
+            ),
+            "CWE-328": (
+                "import hashlib\n"
+                "def hash_password(password):\n"
+                "    return hashlib.md5(password.encode()).hexdigest()\n"
+            ),
+            "CWE-918": (
+                "import urllib.request\n"
+                "def fetch(url):\n"
+                "    return urllib.request.urlopen(url).read()\n"
+            ),
+        }
+
+        for expected_code, code in cases.items():
+            result = analyzer.analyze(code, language="python")
+            assert result.passed is False
+            assert any(f.code == expected_code for f in result.findings)
+
+    def test_builtin_security_patterns_catch_javascript_benchmark_misses(self):
+        analyzer = SastAnalyzer(timeout=1, bandit_enabled=False)
+        eval_result = analyzer.analyze(
+            "function calculate(expr) {\n  return eval(expr);\n}\n",
+            language="javascript",
+        )
+        assert eval_result.passed is False
+        assert any(f.code == "CWE-95" for f in eval_result.findings)
+
+        pollution_result = analyzer.analyze(
+            (
+                "function merge(target, source) {\n"
+                "  for (const key in source) {\n"
+                "    target[key] = source[key];\n"
+                "  }\n"
+                "}\n"
+            ),
+            language="javascript",
+        )
+        assert pollution_result.passed is False
+        assert any(f.code == "CWE-1321" for f in pollution_result.findings)
+
 
 class TestSandboxFixImports:
     """Regression tests for ``SandboxExecutor._fix_imports``.

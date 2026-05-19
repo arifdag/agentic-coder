@@ -50,11 +50,14 @@ GENERATION_TEMPLATE = """Generate Jest unit tests for the following JavaScript/T
 {context_section}
 
 Requirements:
-- Test all exported functions/methods
+- If a target export is named in the context below, import and test only that
+  export. Do not generate broad module-shape tests or tests for every exported
+  constant in a large module.
+- Test all exported functions/methods only when no target export is named.
 - Only test APIs that are actually exported or reachable from the provided source.
 - Do not invent methods, properties, validation branches, or error behavior that
   does not appear in the source.
-- Include at least 3-5 test cases per function
+- Include at least 3-5 focused test cases for the named target or per function
 - Cover edge cases: empty inputs, null/undefined values, boundary values
 - Test expected exceptions only where the source clearly throws.
 - Use describe() blocks to group tests by function
@@ -74,12 +77,16 @@ Error encountered:
 {line_info}
 {suggestion_info}
 {diagnostics_section}
+{target_section}
 
 Repair rules:
 - For assertion/test failures, preserve passing source-grounded tests and remove
   only invalid expectations.
 - For TypeError/ReferenceError/import failures, remove calls to nonexistent APIs
   and import only exports that the source actually provides.
+- For SyntaxError or unterminated string/template failures, rebuild the file as
+  a small syntactically valid Jest suite; avoid multiline test names and huge
+  generated suites.
 - For toThrow failures, keep exception assertions only when the source clearly
   throws for that input; otherwise assert the implemented behavior.
 - Do not replace failing tests with smoke tests that only check the module shape.
@@ -167,10 +174,20 @@ class JestTestAgent:
         self,
         code: str,
         file_path: Optional[str] = None,
+        target_function: Optional[str] = None,
     ) -> GeneratedTest:
         context_section = ""
         if file_path:
             context_section = f"Source file: {file_path}"
+        if target_function:
+            target_context = (
+                f"Target export: {target_function}\n"
+                f"Import it with: const {{ {target_function} }} = require('./source_module');\n"
+                f"Focus every test on {target_function}. Do not test every export in the module."
+            )
+            context_section = (
+                f"{context_section}\n{target_context}" if context_section else target_context
+            )
 
         prompt = GENERATION_TEMPLATE.format(
             code=code,
@@ -208,6 +225,15 @@ class JestTestAgent:
         if context.diagnostics:
             diagnostics_section = f"\nFull verification diagnostics:\n{context.diagnostics}"
 
+        target_section = ""
+        if context.target_function:
+            target_section = (
+                "\nTarget export:\n"
+                f"- Import only the target export with: "
+                f"const {{ {context.target_function} }} = require('./source_module');\n"
+                f"- Focus every test on {context.target_function}; do not test every export."
+            )
+
         prompt = REPAIR_TEMPLATE.format(
             previous_code=context.previous_code,
             error_type=context.error_type,
@@ -215,6 +241,7 @@ class JestTestAgent:
             line_info=line_info,
             suggestion_info=suggestion_info,
             diagnostics_section=diagnostics_section,
+            target_section=target_section,
         )
 
         messages = [

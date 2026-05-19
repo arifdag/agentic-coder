@@ -534,6 +534,7 @@ class TestProjectTestLoader:
         assert case.metadata["sast_source_nonblocking"] is True
         assert case.metadata["target_file"] == "mypkg/core.py"
         assert case.metadata["import_module"] == "mypkg.core"
+        assert case.metadata["target_function"] == "add"
 
     def test_python_repo_metadata_handles_flat_project_modules(self, tmp_path):
         from src.evaluation.benchmarks.projecttest import ProjectTestDataset
@@ -557,6 +558,26 @@ class TestProjectTestLoader:
         assert case.metadata["sast_source_nonblocking"] is True
         assert case.metadata["target_file"] == "flatproj.py"
         assert case.metadata["import_module"] == "flatproj"
+        assert case.metadata["target_function"] == "add_one"
+
+    def test_python_repo_metadata_target_comes_from_selected_module(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_project(
+            tmp_path,
+            "stock",
+            {
+                "validate.py": "class Validator:\n    pass\n",
+                "stock.py": "class Stock:\n    pass\n",
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="python")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+
+        assert case.metadata["target_file"] == "stock.py"
+        assert case.metadata["import_module"] == "stock"
+        assert case.metadata["target_function"] == "Stock"
 
     def test_javascript_projecttest_flattens_to_commonjs(self, tmp_path):
         from src.evaluation.benchmarks.projecttest import ProjectTestDataset
@@ -586,6 +607,7 @@ class TestProjectTestLoader:
         assert "module.exports" in combined
         assert "helper" in combined
         assert "useHelper" in combined
+        assert case.metadata["target_function"] == "helper"
 
 
 # ── Benchmark registry test ──────────────────────────────────────────

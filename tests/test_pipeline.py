@@ -269,6 +269,7 @@ These tests cover the basic functionality.
         assert "import add directly from source_module" in prompt
         assert "broad module API smoke tests" in prompt
         assert "normal inputs, edge cases, and invalid-or-error inputs" in prompt
+        assert "translation-table code" in prompt
 
 
 class TestRepairContext:
@@ -338,6 +339,7 @@ class TestRepairContext:
         assert "Target function/class: add" in prompt
         assert "import add directly from source_module" in prompt
         assert "Call or instantiate add inside every test assertion" in prompt
+        assert "translation-table failures" in prompt
 
     def test_repair_prompt_includes_selected_no_tests_mode(self):
         llm = TestUnitTestAgentParsing.CapturingLLM()

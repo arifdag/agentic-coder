@@ -202,6 +202,50 @@ def test_benchmark_runner_scores_dep_hallucination_by_gate_oracle(tmp_path):
     assert result.pipeline_state["benchmark_oracle"]["reason"] == "phantom_detected"
 
 
+def test_benchmark_runner_scores_security_by_sast_oracle(tmp_path):
+    config = SimpleNamespace(
+        evaluation=EvalConfig(quality_mode="off"),
+        sandbox=SimpleNamespace(),
+        pipeline=SimpleNamespace(max_retries=0),
+    )
+    dataset = SimpleNamespace(name="security", load=lambda: [])
+    runner = BenchmarkRunner(config=config, dataset=dataset, results_dir=str(tmp_path))
+    case = BenchmarkCase(
+        id="sec-eval",
+        code="def run(expr):\n    return eval(expr)\n",
+        language="python",
+        expected_cwe="CWE-95",
+        metadata={"vuln": "eval injection"},
+    )
+    state = {
+        "status": "failed_after_retries",
+        "generated_tests": "def test_run(): pass\n",
+        "test_functions": ["test_run"],
+        "verification_report": {
+            "gates": [
+                {
+                    "gate_name": "sast",
+                    "passed": False,
+                    "findings": [
+                        {
+                            "severity": "error",
+                            "code": "CWE-95",
+                            "message": "eval detected",
+                        }
+                    ],
+                }
+            ]
+        },
+        "retry_count": 0,
+    }
+
+    result = runner._run_one(case, lambda **kwargs: state)
+
+    assert result.passed is True
+    assert result.pipeline_state["pipeline_passed"] is False
+    assert result.pipeline_state["benchmark_oracle"]["reason"] == "vulnerability_detected"
+
+
 def test_benchmark_runner_failed_only_reuses_passing_results(monkeypatch, tmp_path):
     cases = [
         BenchmarkCase(id="pass", code="def ok():\n    return 1\n", language="python"),

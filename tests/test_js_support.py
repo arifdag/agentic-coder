@@ -1,22 +1,17 @@
 """Tests for Phase 5: Multi-Language (JS/TS) Support."""
 
-import json
-import pytest
 from unittest.mock import MagicMock, patch
 
 from src.agents.jest_test import JestTestAgent
+from src.agents.router import Language, RouterAgent, TaskType
 from src.agents.unit_test import GeneratedTest, RepairContext
-from src.agents.router import RouterAgent, TaskType, Language
-from src.verification.js_sandbox import JsSandboxExecutor
+from src.config import JsSandboxConfig
 from src.verification.dependency import (
     DependencyValidator,
     extract_js_imports,
-    NODE_BUILTINS,
-    KNOWN_JS_TEST_PACKAGES,
 )
+from src.verification.js_sandbox import JsSandboxExecutor
 from src.verification.sast import SastAnalyzer
-from src.config import JsSandboxConfig
-
 
 # ── JestTestAgent tests ───────────────────────────────────────────────
 
@@ -93,6 +88,20 @@ const path = require('path');
         result = agent.repair(ctx)
         assert isinstance(result, GeneratedTest)
         llm.invoke.assert_called_once()
+
+    def test_generate_prompt_includes_target_export(self):
+        llm = self._mock_llm(
+            "const { Widget } = require('./source_module');\n"
+            "test('constructs', () => { expect(new Widget()).toBeInstanceOf(Widget); });"
+        )
+        agent = JestTestAgent(llm)
+
+        agent.generate("class Widget {}", target_function="Widget")
+
+        prompt = llm.invoke.call_args[0][0][1].content
+        assert "Target export: Widget" in prompt
+        assert "const { Widget } = require('./source_module');" in prompt
+        assert "Do not generate broad module-shape tests" in prompt
 
 
 # ── JsSandboxExecutor tests ───────────────────────────────────────────
@@ -306,11 +315,14 @@ class TestJsSandboxConfig:
         assert cfg.network_disabled is True
 
     def test_from_env(self):
-        with patch.dict("os.environ", {
-            "JS_SANDBOX_ENABLED": "false",
-            "JS_SANDBOX_IMAGE": "my-node",
-            "JS_SANDBOX_TIMEOUT": "120",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "JS_SANDBOX_ENABLED": "false",
+                "JS_SANDBOX_IMAGE": "my-node",
+                "JS_SANDBOX_TIMEOUT": "120",
+            },
+        ):
             cfg = JsSandboxConfig.from_env()
             assert cfg.enabled is False
             assert cfg.image_name == "my-node"

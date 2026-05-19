@@ -88,6 +88,9 @@ Guidelines:
    - Do NOT call methods or access attributes that do not exist in the source.
    - Do NOT assert stricter validation than the source implements (e.g., asserting
      TypeError on bad inputs when the source does not raise).
+   - For string normalization, regex, or translation-table code, derive expected
+     outputs from the exact implemented table/range. Do not assume all Unicode
+     symbols, punctuation, or whitespace are removed unless the source does that.
    - Only test error/exception paths that the source code actually handles.
 
 4. Follow pytest best practices:
@@ -142,6 +145,9 @@ Requirements:
   validation, errors, or methods that are absent from the source. Do NOT use
   pytest.raises for exceptions the source never raises. Do NOT call nonexistent
   methods or assert stricter validation than the source implements.
+- For string normalization, regex, or translation-table code, compute expected
+  values from the exact source table/range; do not assume all Unicode symbols or
+  punctuation are removed.
 - Use pytest.mark.parametrize for similar test cases.
 - Include at least 3-5 test cases per public function/method.
 
@@ -252,6 +258,9 @@ Repair rules (apply all that match the diagnostics above):
   Source-grounding rule: re-read the source code. Remove tests that assume
   validation, errors, or methods not present in the source. Fix assertions to
   match actual source behavior.
+- For string normalization / regex / translation-table failures, recompute
+  expected values from the exact table or character range in the source rather
+  than assuming broader cleanup behavior.
 - TypeError / AttributeError / NameError / reference error: A test references
   a method, attribute, or name that does not exist in the source. Remove calls
   to nonexistent APIs. Only test functions, methods, and attributes that are

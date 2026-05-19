@@ -107,7 +107,31 @@ class BenchmarkRunner:
         pipeline_passed: bool,
     ) -> tuple[bool, dict[str, Any] | None]:
         """Apply benchmark-specific pass semantics when raw pipeline pass is misleading."""
-        if getattr(self.dataset, "name", None) != "dep_hallucination":
+        dataset_name = getattr(self.dataset, "name", None)
+        if dataset_name == "security":
+            sast_gate = next((g for g in gates if g.get("gate_name") == "sast"), None)
+            sast_passed = None if sast_gate is None else bool(sast_gate.get("passed"))
+            expected_vulnerable = bool(
+                case.expected_cwe
+                or case.metadata.get("vuln")
+                or case.metadata.get("cwe")
+                or case.metadata.get("expected_cwe")
+            )
+            if expected_vulnerable:
+                passed = sast_passed is False
+                reason = "vulnerability_detected" if passed else "vulnerability_escaped"
+            else:
+                passed = pipeline_passed
+                reason = "not_vulnerability_case"
+            return passed, {
+                "benchmark": "security",
+                "reason": reason,
+                "pipeline_passed": pipeline_passed,
+                "sast_passed": sast_passed,
+                "expected_vulnerable": expected_vulnerable,
+            }
+
+        if dataset_name != "dep_hallucination":
             return pipeline_passed, None
 
         dep_gate = next((g for g in gates if g.get("gate_name") == "dependency"), None)
