@@ -7,6 +7,7 @@ Source: https://github.com/YiboWANG214/ProjectTest
 import ast
 import json
 import logging
+import posixpath
 import re
 from pathlib import Path
 from typing import List, Optional, Set
@@ -354,6 +355,185 @@ class ProjectTestDataset:
             out_lines[start - 1 : end] = [replacement_text]
         return future_features, "".join(out_lines), namespace_names
 
+    @staticmethod
+    def _js_identifier(value: str) -> str:
+        """Return a conservative JavaScript identifier derived from a file stem."""
+        ident = re.sub(r"\W", "_", value.strip() or "default_export")
+        if not re.match(r"^[A-Za-z_$]", ident):
+            ident = f"_{ident}"
+        return ident
+
+    @staticmethod
+    def _js_rel_no_ext(rel_path: str) -> str:
+        return re.sub(r"\.(?:m?js|cjs|jsx|ts|tsx)$", "", rel_path.replace("\\", "/"))
+
+    @classmethod
+    def _js_relative_import_targets(cls, rel_path: str, text: str) -> Set[str]:
+        """Collect normalized relative import targets for one JavaScript file."""
+        targets: Set[str] = set()
+        patterns = (
+            r"""^\s*import\s+[^;\n]+?\s+from\s+['"](\.{1,2}/[^'"]+)['"]\s*;?\s*$""",
+            r"""^\s*import\s+['"](\.{1,2}/[^'"]+)['"]\s*;?\s*$""",
+        )
+        rel_dir = posixpath.dirname(rel_path)
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.MULTILINE):
+                spec = match.group(1)
+                normalized = posixpath.normpath(posixpath.join(rel_dir, spec))
+                targets.add(cls._js_rel_no_ext(normalized))
+        return targets
+
+    @classmethod
+    def _topo_sort_js_files(cls, files: list) -> list:
+        """Sort JavaScript files so local import providers appear first."""
+        rel_to_idx = {cls._js_rel_no_ext(rel): idx for idx, (rel, _, _, _, _) in enumerate(files)}
+        deps = {i: set() for i in range(len(files))}
+        for idx, (rel, _, text, _, _) in enumerate(files):
+            for target in cls._js_relative_import_targets(rel, text):
+                owner = rel_to_idx.get(target)
+                if owner is not None and owner != idx:
+                    deps[idx].add(owner)
+
+        from collections import defaultdict, deque
+
+        in_degree = defaultdict(int)
+        rev = defaultdict(set)
+        for dependent, providers in deps.items():
+            for provider in providers:
+                rev[provider].add(dependent)
+                in_degree[dependent] += 1
+
+        def order_key(i):
+            return files[i][0]
+
+        ready = deque(sorted([i for i in range(len(files)) if in_degree[i] == 0], key=order_key))
+        out_idx: list = []
+        seen: Set[int] = set()
+        while ready:
+            i = ready.popleft()
+            if i in seen:
+                continue
+            seen.add(i)
+            out_idx.append(i)
+            for j in sorted(rev[i], key=order_key):
+                in_degree[j] -= 1
+                if in_degree[j] == 0:
+                    ready.append(j)
+
+        remaining = [i for i in range(len(files)) if i not in seen]
+        remaining.sort(key=order_key)
+        out_idx.extend(remaining)
+        return [files[i] for i in out_idx]
+
+    @classmethod
+    def _rewrite_javascript_file(cls, text: str, stem: str) -> tuple[str, Set[str]]:
+        """Best-effort ESM-to-CommonJS flattening for ProjectTest JS cases.
+
+        ProjectTest stores small multi-file ESM snippets. The existing JS sandbox
+        writes a single ``source_module.js`` and the generated Jest tests require
+        it via CommonJS, so leaving ESM ``import``/``export`` syntax intact makes
+        every JS ProjectTest case fail before tests run. This is intentionally
+        conservative; it only rewrites local imports and common export forms.
+        """
+        exports: Set[str] = set()
+        default_name = cls._js_identifier(stem)
+
+        # Local imports are satisfied by concatenating provider files first.
+        text = re.sub(
+            r"""^\s*import\s+[^;\n]+?\s+from\s+['"]\.{1,2}/[^'"]+['"]\s*;?\s*$""",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+        text = re.sub(
+            r"""^\s*import\s+['"]\.{1,2}/[^'"]+['"]\s*;?\s*$""",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+
+        def export_decl(match: re.Match) -> str:
+            exports.add(match.group(2))
+            return f"{match.group(1)} {match.group(2)}"
+
+        text = re.sub(
+            r"\bexport\s+(const|let|var|function|class)\s+([A-Za-z_$][\w$]*)",
+            export_decl,
+            text,
+        )
+
+        def default_named_decl(match: re.Match) -> str:
+            kind = match.group(1)
+            name = match.group(2)
+            exports.add(name)
+            return f"{kind} {name}"
+
+        text = re.sub(
+            r"\bexport\s+default\s+(function|class)\s+([A-Za-z_$][\w$]*)",
+            default_named_decl,
+            text,
+        )
+
+        def default_anon_decl(match: re.Match) -> str:
+            kind = match.group(1)
+            exports.add(default_name)
+            return f"{kind} {default_name}"
+
+        text = re.sub(r"\bexport\s+default\s+(function|class)\s*(?=[({])", default_anon_decl, text)
+
+        def default_object(match: re.Match) -> str:
+            exports.add(default_name)
+            return f"const {default_name} = {{"
+
+        text = re.sub(r"\bexport\s+default\s*\{", default_object, text)
+
+        def default_expr(match: re.Match) -> str:
+            expr = match.group(1).strip()
+            if re.match(r"^[A-Za-z_$][\w$]*$", expr):
+                exports.add(expr)
+                if expr != default_name:
+                    exports.add(default_name)
+                    return f"const {default_name} = {expr};"
+                return ""
+            exports.add(default_name)
+            return f"const {default_name} = {expr};"
+
+        text = re.sub(
+            r"^\s*export\s+default\s+([^;\n]+)\s*;?\s*$",
+            default_expr,
+            text,
+            flags=re.MULTILINE,
+        )
+
+        def export_block(match: re.Match) -> str:
+            for raw in match.group(1).replace("\n", " ").split(","):
+                item = raw.strip()
+                if not item:
+                    continue
+                source_name = re.split(r"\s+as\s+", item)[0].strip()
+                if re.match(r"^[A-Za-z_$][\w$]*$", source_name):
+                    exports.add(source_name)
+            return ""
+
+        text = re.sub(
+            r"^\s*export\s*\{([^}]+)\}\s*;?\s*$",
+            export_block,
+            text,
+            flags=re.MULTILINE,
+        )
+        return text, exports
+
+    @staticmethod
+    def _import_module_from_target(target_file: str) -> Optional[str]:
+        """Convert a project-root-relative Python file path to a module path."""
+        if not target_file.endswith(".py"):
+            return None
+        module = target_file[:-3].replace("\\", "/")
+        if module.endswith("/__init__"):
+            module = module[: -len("/__init__")]
+        module = ".".join(part for part in module.split("/") if part)
+        return module or None
+
     def load(self) -> List[BenchmarkCase]:
         self.download()
         cases: List[BenchmarkCase] = []
@@ -500,15 +680,38 @@ class ProjectTestDataset:
                         parts.append(block)
                     combined = "\n\n".join(parts)
                 else:
-                    combined = "\n\n".join(
-                        f"# --- {rel} ---\n{text}" for rel, _, text, _, _ in rewritten_files
+                    js_exports: Set[str] = set()
+                    js_parts: list = []
+                    js_files = self._topo_sort_js_files(rewritten_files)
+                    for rel, stem, text, _, _ in js_files:
+                        rewritten_js, exports = self._rewrite_javascript_file(text, stem)
+                        js_exports.update(exports)
+                        js_parts.append(f"// --- {rel} ---\n{rewritten_js}")
+                    valid_exports = sorted(
+                        name for name in js_exports if re.match(r"^[A-Za-z_$][\w$]*$", name)
                     )
+                    if valid_exports:
+                        js_parts.append(
+                            "module.exports = {\n"
+                            + ",\n".join(f"  {name}" for name in valid_exports)
+                            + "\n};"
+                        )
+                    combined = "\n\n".join(js_parts)
 
                 # Build metadata for repo-context execution (Python only)
                 metadata: dict = {"project": project_dir.name, "file_count": len(rewritten_files)}
                 if lang_name == "python":
                     metadata["execution_context"] = "repo"
-                    metadata["project_root"] = str(project_dir.resolve())
+                    is_package_project = (project_dir / "__init__.py").exists()
+                    repo_root = project_dir.parent if is_package_project else project_dir
+                    package_rel = (
+                        project_dir.relative_to(repo_root).as_posix() if is_package_project else ""
+                    )
+                    metadata["project_root"] = str(repo_root.resolve())
+                    metadata["package_project_root"] = str(project_dir.resolve())
+                    metadata["pythonpath_entries"] = [package_rel] if package_rel else []
+                    if package_rel:
+                        metadata["package_root"] = package_rel
                     metadata["project_name"] = project_dir.name
                     # Best-effort target file: prefer a file matching the project name, else first .py
                     target_candidates = [
@@ -519,14 +722,22 @@ class ProjectTestDataset:
                     if not target_candidates:
                         target_candidates = [rel for rel, _, _, _, _ in body_files + init_files]
                     if target_candidates:
-                        metadata["target_file"] = target_candidates[0]
+                        target_file = (
+                            f"{package_rel}/{target_candidates[0]}"
+                            if package_rel
+                            else target_candidates[0]
+                        )
+                        metadata["target_file"] = target_file
+                        import_module = self._import_module_from_target(target_file)
+                        if import_module:
+                            metadata["import_module"] = import_module
                     dep_files = (
                         list(project_dir.rglob("requirements*.txt"))
                         + list(project_dir.rglob("setup.py"))
                         + list(project_dir.rglob("pyproject.toml"))
                     )
                     metadata["dependency_files"] = [
-                        str(f.relative_to(project_dir).as_posix()) for f in dep_files
+                        str(f.relative_to(repo_root).as_posix()) for f in dep_files
                     ]
                     metadata["flattened_source_available"] = True
 

@@ -357,13 +357,33 @@ class RepoContextExecutor:
             return False, "; ".join(errors)
         return True, ""
 
-    def _repo_env(self, repo_root: Path) -> dict[str, str]:
+    def _repo_env(
+        self, repo_root: Path, metadata: Optional[Dict[str, Any]] = None
+    ) -> dict[str, str]:
         env = os.environ.copy()
+        metadata = metadata or {}
+        raw_extra_entries = metadata.get("pythonpath_entries") or []
+        if isinstance(raw_extra_entries, str):
+            extra_entries = [raw_extra_entries]
+        elif isinstance(raw_extra_entries, list):
+            extra_entries = [entry for entry in raw_extra_entries if isinstance(entry, str)]
+        else:
+            extra_entries = []
+        package_root = metadata.get("package_root")
+        if isinstance(package_root, str) and package_root:
+            extra_entries.append(package_root)
+
         path_entries = [str(repo_root), str(repo_root / "src")]
+        for entry in extra_entries:
+            extra_path = Path(entry)
+            if not extra_path.is_absolute():
+                extra_path = repo_root / extra_path
+            path_entries.append(str(extra_path))
         existing = env.get("PYTHONPATH")
         if existing:
             path_entries.append(existing)
-        env["PYTHONPATH"] = os.pathsep.join(path_entries)
+        deduped_entries = list(dict.fromkeys(path_entries))
+        env["PYTHONPATH"] = os.pathsep.join(deduped_entries)
         return env
 
     def _target_import_module(self, metadata: Dict[str, Any]) -> Optional[str]:
@@ -407,7 +427,7 @@ class RepoContextExecutor:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=self._repo_env(repo_root),
+                env=self._repo_env(repo_root, metadata),
             )
         except subprocess.TimeoutExpired:
             return ExecutionResult(
@@ -506,7 +526,7 @@ class RepoContextExecutor:
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
-                env=self._repo_env(repo_root),
+                env=self._repo_env(repo_root, metadata),
             )
         except subprocess.TimeoutExpired:
             return ExecutionResult(

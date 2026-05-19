@@ -430,6 +430,37 @@ class TestRepoContextExecutor:
         if result.coverage_data is not None:
             assert "files" in result.coverage_data
 
+    def test_repo_pythonpath_includes_package_root_entries(self, tmp_path):
+        project = tmp_path / "project"
+        package = project / "mypkg"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "helper.py").write_text(
+            "def inc(value):\n    return value + 1\n", encoding="utf-8"
+        )
+        (package / "core.py").write_text(
+            "from helper import inc\n\n" "def add_one(value):\n" "    return inc(value)\n",
+            encoding="utf-8",
+        )
+
+        result = RepoContextExecutor(repo_setup="off").execute(
+            source_code="",
+            test_code=(
+                "from mypkg.core import add_one\n\n"
+                "def test_add_one():\n"
+                "    assert add_one(2) == 3\n"
+            ),
+            metadata={
+                "project_root": str(project),
+                "target_file": "mypkg/core.py",
+                "package_root": "mypkg",
+                "pythonpath_entries": ["mypkg"],
+            },
+        )
+
+        assert result.success is True
+        assert result.tests_run == 1
+
     def test_pytest_timeout_from_metadata(self, tmp_path):
         project = tmp_path / "project"
         package = project / "mypkg"

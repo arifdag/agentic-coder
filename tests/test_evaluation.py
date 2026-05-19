@@ -318,6 +318,14 @@ class TestProjectTestLoader:
             (project_dir / filename).write_text(content, encoding="utf-8")
         return tmp_path
 
+    def _build_fake_js_project(self, tmp_path, name: str, files: dict):
+        """Create ``tmp_path/ProjectTest/dataset/JS/<name>/{files}``."""
+        project_dir = tmp_path / "ProjectTest" / "dataset" / "JS" / name
+        project_dir.mkdir(parents=True)
+        for filename, content in files.items():
+            (project_dir / filename).write_text(content, encoding="utf-8")
+        return tmp_path
+
     def test_intra_project_imports_are_stripped(self, tmp_path):
         from src.evaluation.benchmarks.projecttest import ProjectTestDataset
 
@@ -501,6 +509,79 @@ class TestProjectTestLoader:
         exec(compile(combined, "<combined>", "exec"), ns)
         assert ns["ratio"]("a", "b") == 100
         assert ns["ratio"](None, "b") == 0
+
+    def test_python_repo_metadata_uses_importable_package_root(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_project(
+            tmp_path,
+            "mypkg",
+            {
+                "__init__.py": "from mypkg.core import add\n",
+                "core.py": "def add(a, b):\n    return a + b\n",
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="python")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+
+        repo_root = tmp_path / "ProjectTest" / "dataset" / "Python"
+        assert case.metadata["execution_context"] == "repo"
+        assert case.metadata["project_root"] == str(repo_root.resolve())
+        assert case.metadata["package_root"] == "mypkg"
+        assert case.metadata["pythonpath_entries"] == ["mypkg"]
+        assert case.metadata["target_file"] == "mypkg/core.py"
+        assert case.metadata["import_module"] == "mypkg.core"
+
+    def test_python_repo_metadata_handles_flat_project_modules(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_project(
+            tmp_path,
+            "flatproj",
+            {
+                "flatproj.py": "from helper import inc\n\ndef add_one(value):\n    return inc(value)\n",
+                "helper.py": "def inc(value):\n    return value + 1\n",
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="python")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+
+        repo_root = tmp_path / "ProjectTest" / "dataset" / "Python" / "flatproj"
+        assert case.metadata["project_root"] == str(repo_root.resolve())
+        assert case.metadata["pythonpath_entries"] == []
+        assert case.metadata["target_file"] == "flatproj.py"
+        assert case.metadata["import_module"] == "flatproj"
+
+    def test_javascript_projecttest_flattens_to_commonjs(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_js_project(
+            tmp_path,
+            "widgets",
+            {
+                "main.js": (
+                    "import { helper } from './helper.js'\n"
+                    "export const useHelper = () => helper() + 1\n"
+                ),
+                "helper.js": "export const helper = () => 2\n",
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="javascript")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+        combined = case.code
+
+        assert combined.startswith("// --- helper.js ---")
+        assert "# ---" not in combined
+        assert "import { helper }" not in combined
+        assert "export const" not in combined
+        assert "const helper = () => 2" in combined
+        assert "const useHelper = () => helper() + 1" in combined
+        assert "module.exports" in combined
+        assert "helper" in combined
+        assert "useHelper" in combined
 
 
 # ── Benchmark registry test ──────────────────────────────────────────

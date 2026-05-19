@@ -75,20 +75,34 @@ Guidelines:
      inside the test file. Always import and delegate to the original implementation.
    - If the prompt names a source module, import from that module - do not substitute
      a local mock implementation.
+   - Ground every expected value, exception, method call, and attribute access in
+     the provided source. Do NOT assume stricter validation, hidden helper
+     methods, or APIs that are not present in the source.
 
-3. Follow pytest best practices:
+3. Source grounding (critical: prevents common failures):
+   - Before writing any test, review the provided source code carefully.
+   - Only test behaviors that are explicitly implemented in the source. Do NOT assume
+     the target raises exceptions, validates inputs, or returns specific error types
+     unless the source code clearly shows that behavior.
+   - Do NOT use pytest.raises unless the source code explicitly raises that exception.
+   - Do NOT call methods or access attributes that do not exist in the source.
+   - Do NOT assert stricter validation than the source implements (e.g., asserting
+     TypeError on bad inputs when the source does not raise).
+   - Only test error/exception paths that the source code actually handles.
+
+4. Follow pytest best practices:
    - Use descriptive test function names (test_<function>_<scenario>)
-   - Use pytest.raises for exception testing
+   - Use pytest.raises for exception testing ONLY when the source confirms it raises
    - Use parametrize for multiple similar test cases when appropriate
    - Keep tests independent and deterministic
 
-4. Code quality:
+5. Code quality:
    - Include necessary imports
    - Add brief docstrings explaining what each test verifies
    - Avoid external dependencies (network, filesystem) unless testing that specifically
    - Use fixtures for common setup when needed
 
-5. Output format:
+6. Output format:
    - Return ONLY the Python test code
    - Start with imports
    - Do not include markdown code blocks or explanations
@@ -116,10 +130,18 @@ Requirements:
 - Do NOT redefine targets locally; always import and delegate to the original.
 - Call or instantiate the target in assertions to exercise its logic and branches.
 - Every test must have meaningful assertions; never assert True, assert 1 == 1, or pass-only bodies.
+- Read the provided source before choosing expectations. Do not call methods,
+  constructors, attributes, or validation paths that are not implemented in the source.
+- Use pytest.raises only when the source clearly raises that exception for the
+  tested input; otherwise assert the behavior the source actually implements.
 - Include at least one normal case, one edge case, and one invalid/error case
   when the target behavior makes that possible.
 - Cover edge cases: empty inputs, None values, boundary values, and error paths.
-- Test expected exceptions with pytest.raises where applicable.
+- Test expected exceptions with pytest.raises ONLY where the source code actually raises.
+- Source grounding: review the provided source before writing tests. Do NOT assume
+  validation, errors, or methods that are absent from the source. Do NOT use
+  pytest.raises for exceptions the source never raises. Do NOT call nonexistent
+  methods or assert stricter validation than the source implements.
 - Use pytest.mark.parametrize for similar test cases.
 - Include at least 3-5 test cases per public function/method.
 
@@ -159,6 +181,10 @@ Critical output requirements:
 - Do NOT import from source_module for TestGenEval official runs.
 - Do NOT redefine, shadow, copy, stub, monkeypatch away, or reimplement production targets in the test file.
 - Every test must call or instantiate the real target and include meaningful assertions or pytest.raises checks.
+- Source grounding: before writing tests, review the source code. Only test behaviors
+  the source explicitly implements. Do NOT assume exceptions, validation, or methods
+  absent from the source. Do NOT use pytest.raises (or try/except) for errors the
+  source never raises. Do NOT call nonexistent methods or assert stricter validation.
 - Never use dummy assertions such as assert True, assert 1 == 1, or pass-only test bodies.
 - Prefer a compact set of 3-8 focused tests over a huge broad test file.
 - Avoid network, sleeps, wall-clock timing, randomness without fixed seeds, or external services.
@@ -221,7 +247,15 @@ Repair rules (apply all that match the diagnostics above):
   Add more targeted tests for uncovered branches and error-handling paths.
 - assertion_error / test_failure: A test assertion failed or raised an error.
   Do not return an empty file. Preserve passing target-focused tests, remove
-  only invalid assumptions, and fix expected values to match current behavior.
+  only invalid assumptions, nonexistent API calls, and expected exceptions that
+  are not supported by the source. Fix expected values to match current behavior.
+  Source-grounding rule: re-read the source code. Remove tests that assume
+  validation, errors, or methods not present in the source. Fix assertions to
+  match actual source behavior.
+- TypeError / AttributeError / NameError / reference error: A test references
+  a method, attribute, or name that does not exist in the source. Remove calls
+  to nonexistent APIs. Only test functions, methods, and attributes that are
+  defined in the source code.
 - coverage gaps: Add tests that call the target on inputs reaching the uncovered lines.
 
 Target relevance and coverage rules (critical):
