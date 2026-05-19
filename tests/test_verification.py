@@ -189,6 +189,32 @@ import this_package_definitely_does_not_exist_xyzzy_12345
         assert "phantom=" in result.details
         assert "superturboparser_xyzzy_not_a_real_package" in result.details
 
+    def test_extra_known_import_roots_are_allowed_per_call(self, monkeypatch):
+        validator = DependencyValidator(pypi_timeout=5)
+        monkeypatch.setattr(validator, "_check_pypi", lambda package: False)
+
+        code = (
+            "from gin_rummy import Card\n"
+            "from helper import inc\n"
+            "from source_module import target\n"
+        )
+        result = validator.validate(code, extra_known={"gin_rummy", "helper"})
+
+        assert result.passed is True
+        assert not result.findings
+
+    def test_extra_known_import_roots_do_not_mask_other_phantoms(self, monkeypatch):
+        validator = DependencyValidator(pypi_timeout=5)
+        monkeypatch.setattr(validator, "_check_pypi", lambda package: False)
+
+        code = "from gin_rummy import Card\nimport definitely_missing_package\n"
+        result = validator.validate(code, extra_known={"gin_rummy"})
+
+        assert result.passed is False
+        messages = [finding.message for finding in result.findings]
+        assert any("definitely_missing_package" in message for message in messages)
+        assert not any("gin_rummy" in message for message in messages)
+
 
 class TestSastAnalyzer:
     """Tests for the SAST gate."""

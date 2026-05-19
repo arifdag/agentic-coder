@@ -437,13 +437,14 @@ class DependencyValidator:
         self.pypi_timeout = pypi_timeout
         self.extra_known = extra_known or set()
 
-    def _is_known_safe(self, package: str) -> bool:
+    def _is_known_safe(self, package: str, extra_known: Optional[Set[str]] = None) -> bool:
         """Check if a Python package is known-safe (stdlib, test infra, etc.)."""
+        known = self.extra_known | (extra_known or set())
         if package in STDLIB_MODULES:
             return True
         if package in KNOWN_TEST_PACKAGES:
             return True
-        if package in self.extra_known:
+        if package in known:
             return True
         if package == "source_module":
             return True
@@ -453,8 +454,9 @@ class DependencyValidator:
             return True
         return False
 
-    def _is_known_safe_js(self, package: str) -> bool:
+    def _is_known_safe_js(self, package: str, extra_known: Optional[Set[str]] = None) -> bool:
         """Check if a JS package is known-safe (builtins, test infra, etc.)."""
+        known = self.extra_known | (extra_known or set())
         if package in NODE_BUILTINS:
             return True
         bare = package.replace("node:", "")
@@ -462,7 +464,7 @@ class DependencyValidator:
             return True
         if package in KNOWN_JS_TEST_PACKAGES:
             return True
-        if package in self.extra_known:
+        if package in known:
             return True
         if package in ("source_module", "./source_module"):
             return True
@@ -494,28 +496,36 @@ class DependencyValidator:
         except httpx.HTTPError:
             return True
 
-    def validate(self, code: str, language: Optional[str] = None) -> GateResult:
+    def validate(
+        self,
+        code: str,
+        language: Optional[str] = None,
+        extra_known: Optional[Set[str]] = None,
+    ) -> GateResult:
         """Validate all imports in the given code.
 
         Args:
             code: Source code to check
             language: Language hint (``python``, ``javascript``, ``typescript``)
+            extra_known: Additional import roots that are local/allowed for
+                this validation call.
 
         Returns:
             GateResult indicating pass/fail and any phantom packages
         """
         if language in ("javascript", "typescript"):
-            return self._validate_js(code)
-        return self._validate_python(code)
+            return self._validate_js(code, extra_known=extra_known)
+        return self._validate_python(code, extra_known=extra_known)
 
-    def _validate_python(self, code: str) -> GateResult:
+    def _validate_python(self, code: str, extra_known: Optional[Set[str]] = None) -> GateResult:
         imports = extract_imports(code)
         findings: List[Finding] = []
 
         third_party = {
             pkg
             for pkg in imports
-            if not self._is_known_safe(pkg) and not _is_known_installed_submodule(pkg)
+            if not self._is_known_safe(pkg, extra_known=extra_known)
+            and not _is_known_installed_submodule(pkg)
         }
 
         for pkg in sorted(third_party):
@@ -545,11 +555,13 @@ class DependencyValidator:
             ),
         )
 
-    def _validate_js(self, code: str) -> GateResult:
+    def _validate_js(self, code: str, extra_known: Optional[Set[str]] = None) -> GateResult:
         imports = extract_js_imports(code)
         findings: List[Finding] = []
 
-        third_party = {pkg for pkg in imports if not self._is_known_safe_js(pkg)}
+        third_party = {
+            pkg for pkg in imports if not self._is_known_safe_js(pkg, extra_known=extra_known)
+        }
 
         for pkg in sorted(third_party):
             exists = self._check_npm(pkg)

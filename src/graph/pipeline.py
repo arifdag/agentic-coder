@@ -11,6 +11,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from typing import List, Literal, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -56,6 +57,57 @@ def _import_names_for_language(code: str, language: str) -> set[str]:
     if language in JS_LANGUAGES:
         return extract_js_imports(code)
     return extract_imports(code)
+
+
+def _repo_local_import_roots(metadata: dict) -> set[str]:
+    """Collect import roots that belong to the repo under test."""
+    roots: set[str] = set()
+    for key in ("local_import_roots", "pythonpath_entries"):
+        values = metadata.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                roots.add(Path(value.strip()).name)
+
+    for key in ("package_root", "project_name", "import_module"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            roots.add(value.strip().replace("\\", "/").split("/")[0].split(".")[0])
+
+    target_file = metadata.get("target_file") or metadata.get("code_file")
+    if isinstance(target_file, str) and target_file.endswith(".py"):
+        path = Path(target_file.replace("\\", "/"))
+        roots.add(path.stem)
+        if len(path.parts) > 1:
+            roots.add(path.parts[0])
+
+    scan_root_value = metadata.get("package_project_root") or metadata.get("project_root")
+    if isinstance(scan_root_value, str) and scan_root_value.strip():
+        scan_root = Path(scan_root_value)
+        if scan_root.exists() and scan_root.is_dir():
+            for src in scan_root.rglob("*.py"):
+                rel_parts = set(src.relative_to(scan_root).parts[:-1])
+                if "__pycache__" in rel_parts:
+                    continue
+                roots.add(src.stem)
+                roots.update(part for part in rel_parts if part and part != "__pycache__")
+
+    return {root for root in roots if root and root != "."}
+
+
+def _nonblocking_source_sast_findings(findings: list[Finding]) -> list[Finding]:
+    """Convert source-only SAST findings into informational diagnostics."""
+    out: list[Finding] = []
+    for finding in findings:
+        message = f"[source non-blocking] {finding.message}"
+        out.append(finding.model_copy(update={"severity": Severity.INFO, "message": message}))
+    return out
+
+
+def _sast_source_nonblocking(metadata: dict) -> bool:
+    """Return True when source SAST is diagnostic-only for this benchmark case."""
+    return bool(metadata.get("sast_source_nonblocking"))
 
 
 def _pytest_test_names(code: str) -> List[str]:
@@ -451,6 +503,7 @@ def create_pipeline(config: Optional[Config] = None):
 
         is_ui = task_type == TaskType.UI_TEST.value
         lang = state.get("language", Language.PYTHON.value)
+        repo_meta = state.get("repo_metadata") or {}
 
         test_code = state["generated_tests"]
         source_and_test = state["code_input"] + "\n\n" + test_code
@@ -461,6 +514,22 @@ def create_pipeline(config: Optional[Config] = None):
                     gate_name="sast", passed=True, findings=[], details="Skipped for UI tests"
                 )
             if sast_analyzer:
+                if _sast_source_nonblocking(repo_meta):
+                    test_result = sast_analyzer.analyze(test_code, language=lang)
+                    source_result = sast_analyzer.analyze(state["code_input"], language=lang)
+                    return GateResult(
+                        gate_name="sast",
+                        passed=test_result.passed,
+                        findings=(
+                            list(test_result.findings)
+                            + _nonblocking_source_sast_findings(source_result.findings)
+                        ),
+                        details=(
+                            "source_sast_nonblocking=true; "
+                            f"test_sast_passed={test_result.passed}; "
+                            f"source_sast_passed={source_result.passed}"
+                        ),
+                    )
                 return sast_analyzer.analyze(source_and_test, language=lang)
             return GateResult(gate_name="sast", passed=True, findings=[])
 
@@ -473,7 +542,11 @@ def create_pipeline(config: Optional[Config] = None):
             # thing the ``dep_hallucination`` benchmark exists to
             # surface) slipped through undetected.
             combined = (state["code_input"] or "") + "\n\n" + (test_code or "")
-            return dep_validator.validate(combined, language=lang)
+            return dep_validator.validate(
+                combined,
+                language=lang,
+                extra_known=_repo_local_import_roots(repo_meta),
+            )
 
         def run_relevance():
             if not relevance_validator or is_ui or lang in JS_LANGUAGES:

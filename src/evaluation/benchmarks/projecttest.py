@@ -699,7 +699,12 @@ class ProjectTestDataset:
                     combined = "\n\n".join(js_parts)
 
                 # Build metadata for repo-context execution (Python only)
-                metadata: dict = {"project": project_dir.name, "file_count": len(rewritten_files)}
+                metadata: dict = {
+                    "project": project_dir.name,
+                    "file_count": len(rewritten_files),
+                    "benchmark": "projecttest",
+                    "sast_source_nonblocking": True,
+                }
                 if lang_name == "python":
                     metadata["execution_context"] = "repo"
                     is_package_project = (project_dir / "__init__.py").exists()
@@ -710,6 +715,7 @@ class ProjectTestDataset:
                     metadata["project_root"] = str(repo_root.resolve())
                     metadata["package_project_root"] = str(project_dir.resolve())
                     metadata["pythonpath_entries"] = [package_rel] if package_rel else []
+                    metadata["local_import_roots"] = sorted(intra_roots)
                     if package_rel:
                         metadata["package_root"] = package_rel
                     metadata["project_name"] = project_dir.name

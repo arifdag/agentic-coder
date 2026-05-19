@@ -463,6 +463,150 @@ def test_pipeline_does_not_repair_source_only_phantom_import(monkeypatch, tmp_pa
     assert fake_llm.calls == 1
 
 
+def test_pipeline_treats_project_source_sast_as_nonblocking(monkeypatch, tmp_path):
+    from src.graph import pipeline as pipeline_module
+    from src.verification.models import Finding, GateResult, Severity
+
+    class FakeLLM:
+        def invoke(self, messages):
+            return SimpleNamespace(
+                content=(
+                    "from source_module import target\n\n"
+                    "def test_target():\n"
+                    "    assert target('echo ok') == 'echo ok'\n"
+                )
+            )
+
+    class FakeSastAnalyzer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def analyze(self, code, language=None):
+            if "exec(command)" in code:
+                return GateResult(
+                    gate_name="sast",
+                    passed=False,
+                    findings=[
+                        Finding(
+                            severity=Severity.WARNING,
+                            code="CWE-78",
+                            message="Use of exec detected.",
+                        )
+                    ],
+                )
+            return GateResult(gate_name="sast", passed=True, findings=[])
+
+    class FakeSandboxExecutor:
+        def __init__(self, config):
+            self.config = config
+
+        def execute(self, source_code, test_code):
+            return SimpleNamespace(
+                success=True,
+                tests_run=1,
+                tests_passed=1,
+                tests_failed=0,
+                coverage=100.0,
+                branch_coverage=None,
+                coverage_data=None,
+                coverage_gaps=None,
+                stdout="1 passed",
+                stderr="",
+                error_type=None,
+                error_message=None,
+                line_number=None,
+                infrastructure_pass=True,
+                repo_setup_pass=None,
+            )
+
+    monkeypatch.setattr(pipeline_module, "get_role_llm", lambda config, role: FakeLLM())
+    monkeypatch.setattr(pipeline_module, "SastAnalyzer", FakeSastAnalyzer)
+    monkeypatch.setattr(pipeline_module, "SandboxExecutor", FakeSandboxExecutor)
+
+    config = Config()
+    config.sast.enabled = True
+    config.dependency.enabled = False
+    config.judge.enabled = False
+    config.pipeline.audit_log_dir = str(tmp_path / "audit")
+
+    result = pipeline_module.run_pipeline(
+        code="def target(command):\n    exec(command)\n    return command\n",
+        user_request="Generate unit tests",
+        max_retries=0,
+        config=config,
+        target_function="target",
+        repo_metadata={"sast_source_nonblocking": True},
+    )
+
+    sast_gate = next(g for g in result["gate_results"] if g["gate_name"] == "sast")
+    assert result["status"] == "success"
+    assert sast_gate["passed"] is True
+    assert "source_sast_nonblocking=true" in sast_gate["details"]
+    assert sast_gate["findings"][0]["severity"] == "info"
+
+
+def test_pipeline_still_blocks_generated_test_sast(monkeypatch, tmp_path):
+    from src.graph import pipeline as pipeline_module
+    from src.verification.models import Finding, GateResult, Severity
+
+    class FakeLLM:
+        def invoke(self, messages):
+            return SimpleNamespace(
+                content=(
+                    "import os\n"
+                    "from source_module import target\n\n"
+                    "def test_target():\n"
+                    "    os.system('echo bad')\n"
+                    "    assert target() == 1\n"
+                )
+            )
+
+    class FakeSastAnalyzer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def analyze(self, code, language=None):
+            if "os.system" in code:
+                return GateResult(
+                    gate_name="sast",
+                    passed=False,
+                    findings=[
+                        Finding(
+                            severity=Severity.WARNING,
+                            code="CWE-78",
+                            message="Shell execution in generated test.",
+                        )
+                    ],
+                )
+            return GateResult(gate_name="sast", passed=True, findings=[])
+
+    monkeypatch.setattr(pipeline_module, "get_role_llm", lambda config, role: FakeLLM())
+    monkeypatch.setattr(pipeline_module, "SastAnalyzer", FakeSastAnalyzer)
+
+    config = Config()
+    config.sast.enabled = True
+    config.dependency.enabled = False
+    config.judge.enabled = False
+    config.pipeline.audit_log_dir = str(tmp_path / "audit")
+
+    result = pipeline_module.run_pipeline(
+        code="def target():\n    return 1\n",
+        user_request="Generate unit tests",
+        max_retries=0,
+        config=config,
+        target_function="target",
+        repo_metadata={"sast_source_nonblocking": True},
+    )
+
+    sast_gate = next(g for g in result["gate_results"] if g["gate_name"] == "sast")
+    assert result["status"] == "failed_after_retries"
+    assert sast_gate["passed"] is False
+    assert any(
+        finding["message"] == "Shell execution in generated test."
+        for finding in sast_gate["findings"]
+    )
+
+
 def test_pipeline_repair_empty_output_falls_back_to_target_scaffold(monkeypatch, tmp_path):
     from src.graph import pipeline as pipeline_module
 

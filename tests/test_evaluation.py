@@ -530,6 +530,8 @@ class TestProjectTestLoader:
         assert case.metadata["project_root"] == str(repo_root.resolve())
         assert case.metadata["package_root"] == "mypkg"
         assert case.metadata["pythonpath_entries"] == ["mypkg"]
+        assert set(case.metadata["local_import_roots"]) >= {"mypkg", "core"}
+        assert case.metadata["sast_source_nonblocking"] is True
         assert case.metadata["target_file"] == "mypkg/core.py"
         assert case.metadata["import_module"] == "mypkg.core"
 
@@ -551,6 +553,8 @@ class TestProjectTestLoader:
         repo_root = tmp_path / "ProjectTest" / "dataset" / "Python" / "flatproj"
         assert case.metadata["project_root"] == str(repo_root.resolve())
         assert case.metadata["pythonpath_entries"] == []
+        assert set(case.metadata["local_import_roots"]) >= {"flatproj", "helper"}
+        assert case.metadata["sast_source_nonblocking"] is True
         assert case.metadata["target_file"] == "flatproj.py"
         assert case.metadata["import_module"] == "flatproj"
 
