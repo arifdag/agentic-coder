@@ -132,9 +132,13 @@ class ProjectTestDataset:
                 return name
         return names[0]
 
-    @staticmethod
-    def _ordered_public_javascript_targets(text: str) -> list[str]:
+    @classmethod
+    def _ordered_public_javascript_targets(cls, text: str) -> list[str]:
         """Return likely callable/class exports in source order."""
+        # Comments contain many prose snippets like "function with ..." and
+        # "class for ..."; strip them before using regex-based discovery.
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+        text = re.sub(r"//[^\n]*", "", text)
         patterns = (
             r"\bclass\s+([A-Za-z_$][\w$]*)",
             r"\bfunction\s+([A-Za-z_$][\w$]*)",
@@ -147,10 +151,55 @@ class ProjectTestDataset:
         seen: set[str] = set()
         ordered: list[str] = []
         for _, name in sorted(matches, key=lambda item: item[0]):
+            if name == "$" or name in cls._JS_RESERVED_WORDS:
+                continue
             if name not in seen:
                 seen.add(name)
                 ordered.append(name)
         return ordered
+
+    _JS_RESERVED_WORDS = frozenset(
+        {
+            "and",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "export",
+            "extends",
+            "finally",
+            "for",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "let",
+            "new",
+            "or",
+            "return",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "to",
+            "try",
+            "typeof",
+            "var",
+            "void",
+            "while",
+            "with",
+            "yield",
+        }
+    )
 
     @staticmethod
     def _module_level_reads(text: str) -> Set[str]:
@@ -436,6 +485,7 @@ class ProjectTestDataset:
         patterns = (
             r"""^\s*import\s+[^;\n]+?\s+from\s+['"](\.{1,2}/[^'"]+)['"]\s*;?\s*$""",
             r"""^\s*import\s+['"](\.{1,2}/[^'"]+)['"]\s*;?\s*$""",
+            r"""require\s*\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)""",
         )
         rel_dir = posixpath.dirname(rel_path)
         for pattern in patterns:
@@ -488,6 +538,65 @@ class ProjectTestDataset:
         return [files[i] for i in out_idx]
 
     @classmethod
+    def _js_module_name_from_spec(cls, spec: str) -> str:
+        """Convert a relative JS import specifier into the flattened symbol name."""
+        normalized = cls._js_rel_no_ext(posixpath.normpath(spec.replace("\\", "/")))
+        return cls._js_identifier(posixpath.basename(normalized))
+
+    @classmethod
+    def _rewrite_commonjs_requires(cls, text: str) -> str:
+        """Rewrite local CommonJS imports after flattening provider files.
+
+        ``var Shape = require('./Shape')`` would redeclare ``Shape`` after the
+        provider file has already defined it. We drop same-name bindings and
+        preserve only useful property aliases such as
+        ``shallowClone = require('./Utils').shallowClone``.
+        """
+
+        require_expr = re.compile(
+            r"""require\s*\(\s*['"](\.{1,2}/[^'"]+)['"]\s*\)(?:\.([A-Za-z_$][\w$]*))?"""
+        )
+
+        def rewrite_declaration(match: re.Match) -> str:
+            body = match.group(2)
+            replacements: list[str] = []
+            for raw_part in body.split(","):
+                part = raw_part.strip()
+                if not part:
+                    continue
+                req = require_expr.search(part)
+                if not req:
+                    replacements.append(part)
+                    continue
+                left = part.split("=", 1)[0].strip()
+                if not re.match(r"^[A-Za-z_$][\w$]*$", left):
+                    continue
+                module_name = cls._js_module_name_from_spec(req.group(1))
+                prop = req.group(2)
+                if prop:
+                    replacements.append(f"{left} = {module_name}.{prop}")
+                elif left != module_name:
+                    replacements.append(f"{left} = {module_name}")
+
+            if not replacements:
+                return ""
+            return "var " + ", ".join(replacements) + ";"
+
+        text = re.sub(
+            r"""^\s*(var|let|const)\s+([^;]*require\s*\(\s*['"]\.{1,2}/[^;]+);?""",
+            rewrite_declaration,
+            text,
+            flags=re.MULTILINE,
+        )
+
+        def rewrite_remaining_require(match: re.Match) -> str:
+            module_name = cls._js_module_name_from_spec(match.group(1))
+            prop = match.group(2)
+            return f"{module_name}.{prop}" if prop else module_name
+
+        return require_expr.sub(rewrite_remaining_require, text)
+
+    @classmethod
     def _rewrite_javascript_file(cls, text: str, stem: str) -> tuple[str, Set[str]]:
         """Best-effort ESM-to-CommonJS flattening for ProjectTest JS cases.
 
@@ -499,6 +608,10 @@ class ProjectTestDataset:
         """
         exports: Set[str] = set()
         default_name = cls._js_identifier(stem)
+
+        def add_export(name: str) -> None:
+            if re.match(r"^[A-Za-z_$][\w$]*$", name) and name not in cls._JS_RESERVED_WORDS:
+                exports.add(name)
 
         # Local imports are satisfied by concatenating provider files first.
         text = re.sub(
@@ -513,10 +626,60 @@ class ProjectTestDataset:
             text,
             flags=re.MULTILINE,
         )
+        text = cls._rewrite_commonjs_requires(text)
+
+        def module_exports_var(match: re.Match) -> str:
+            kind, name, expr = match.group(1), match.group(2), match.group(3)
+            add_export(name)
+            return f"{kind} {name} = {expr}"
+
+        text = re.sub(
+            r"""\b(var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*module\.exports\s*=\s*([^;\n]+)""",
+            module_exports_var,
+            text,
+        )
+
+        def module_exports_object(match: re.Match) -> str:
+            for raw in match.group(1).replace("\n", " ").split(","):
+                item = raw.strip()
+                if not item:
+                    continue
+                if ":" in item:
+                    _, value = item.split(":", 1)
+                    source_name = value.strip().split(".")[0].strip()
+                else:
+                    source_name = item
+                if re.match(r"^[A-Za-z_$][\w$]*$", source_name):
+                    add_export(source_name)
+            return ""
+
+        text = re.sub(
+            r"""^\s*module\.exports\s*=\s*\{([\s\S]*?)\}\s*;?\s*$""",
+            module_exports_object,
+            text,
+            flags=re.MULTILINE,
+        )
+
+        def module_exports_name(match: re.Match) -> str:
+            add_export(match.group(1))
+            return ""
+
+        text = re.sub(
+            r"""^\s*module\.exports\s*=\s*([A-Za-z_$][\w$]*)\s*;?\s*$""",
+            module_exports_name,
+            text,
+            flags=re.MULTILINE,
+        )
 
         def export_decl(match: re.Match) -> str:
-            exports.add(match.group(2))
-            return f"{match.group(1)} {match.group(2)}"
+            name = match.group(2)
+            if name == "$":
+                return match.group(0)
+            add_export(name)
+            kind = match.group(1)
+            if kind in {"const", "let"}:
+                kind = "var"
+            return f"{kind} {name}"
 
         text = re.sub(
             r"\bexport\s+(const|let|var|function|class)\s+([A-Za-z_$][\w$]*)",
@@ -527,7 +690,7 @@ class ProjectTestDataset:
         def default_named_decl(match: re.Match) -> str:
             kind = match.group(1)
             name = match.group(2)
-            exports.add(name)
+            add_export(name)
             return f"{kind} {name}"
 
         text = re.sub(
@@ -538,13 +701,13 @@ class ProjectTestDataset:
 
         def default_anon_decl(match: re.Match) -> str:
             kind = match.group(1)
-            exports.add(default_name)
+            add_export(default_name)
             return f"{kind} {default_name}"
 
         text = re.sub(r"\bexport\s+default\s+(function|class)\s*(?=[({])", default_anon_decl, text)
 
         def default_object(match: re.Match) -> str:
-            exports.add(default_name)
+            add_export(default_name)
             return f"const {default_name} = {{"
 
         text = re.sub(r"\bexport\s+default\s*\{", default_object, text)
@@ -552,12 +715,12 @@ class ProjectTestDataset:
         def default_expr(match: re.Match) -> str:
             expr = match.group(1).strip()
             if re.match(r"^[A-Za-z_$][\w$]*$", expr):
-                exports.add(expr)
+                add_export(expr)
                 if expr != default_name:
-                    exports.add(default_name)
+                    add_export(default_name)
                     return f"const {default_name} = {expr};"
                 return ""
-            exports.add(default_name)
+            add_export(default_name)
             return f"const {default_name} = {expr};"
 
         text = re.sub(
@@ -574,7 +737,7 @@ class ProjectTestDataset:
                     continue
                 source_name = re.split(r"\s+as\s+", item)[0].strip()
                 if re.match(r"^[A-Za-z_$][\w$]*$", source_name):
-                    exports.add(source_name)
+                    add_export(source_name)
             return ""
 
         text = re.sub(
@@ -583,7 +746,41 @@ class ProjectTestDataset:
             text,
             flags=re.MULTILINE,
         )
+        # Flattened ProjectTest snippets share one CommonJS scope. Distinct
+        # source modules sometimes reuse top-level helper names, which is legal
+        # in separate ESM modules but a SyntaxError with concatenated `const`.
+        text = re.sub(r"^(const|let)\s+", "var ", text, flags=re.MULTILINE)
         return text, exports
+
+    @classmethod
+    def _select_javascript_target(
+        cls,
+        exports: list[str],
+        combined_source: str,
+        project_name: str,
+    ) -> Optional[str]:
+        """Pick a callable exported target for a ProjectTest JS case."""
+        export_set = {
+            name for name in exports if name not in cls._JS_RESERVED_WORDS and name != "$"
+        }
+        if not export_set:
+            return None
+
+        callable_exports = [
+            name
+            for name in cls._ordered_public_javascript_targets(combined_source)
+            if name in export_set
+        ]
+        candidates = callable_exports or sorted(export_set)
+        normalized_project = cls._js_identifier(project_name).lower()
+        for name in candidates:
+            lowered = name.lower()
+            if lowered == normalized_project or lowered.startswith(normalized_project):
+                return name
+        for name in candidates:
+            if name[:1].isupper():
+                return name
+        return candidates[0]
 
     @staticmethod
     def _import_module_from_target(target_file: str) -> Optional[str]:
@@ -695,6 +892,7 @@ class ProjectTestDataset:
                 #      (``utils.foo = foo``) so downstream files see a fully
                 #      populated namespace.
                 #   3. Emit all other files after.
+                js_valid_exports: list[str] = []
                 if lang_name == "python":
                     used_namespaces: Set[str] = set()
                     for _, _, _, ns_needed, _ in rewritten_files:
@@ -749,13 +947,13 @@ class ProjectTestDataset:
                         rewritten_js, exports = self._rewrite_javascript_file(text, stem)
                         js_exports.update(exports)
                         js_parts.append(f"// --- {rel} ---\n{rewritten_js}")
-                    valid_exports = sorted(
+                    js_valid_exports = sorted(
                         name for name in js_exports if re.match(r"^[A-Za-z_$][\w$]*$", name)
                     )
-                    if valid_exports:
+                    if js_valid_exports:
                         js_parts.append(
                             "module.exports = {\n"
-                            + ",\n".join(f"  {name}" for name in valid_exports)
+                            + ",\n".join(f"  {name}" for name in js_valid_exports)
                             + "\n};"
                         )
                     combined = "\n\n".join(js_parts)
@@ -799,6 +997,16 @@ class ProjectTestDataset:
                         import_module = self._import_module_from_target(target_file)
                         if import_module:
                             metadata["import_module"] = import_module
+                        target_entry = next(
+                            (
+                                item
+                                for item in body_files + init_files
+                                if item[0] == target_candidates[0]
+                            ),
+                            None,
+                        )
+                        if target_entry is not None:
+                            metadata["target_source_code"] = target_entry[2]
                         target_name = self._target_for_python_file(
                             target_candidates[0],
                             body_files + init_files,
@@ -816,9 +1024,13 @@ class ProjectTestDataset:
                     ]
                     metadata["flattened_source_available"] = True
                 elif lang_name == "javascript":
-                    js_targets = self._ordered_public_javascript_targets(combined)
-                    if js_targets:
-                        metadata["target_function"] = js_targets[0]
+                    js_target = self._select_javascript_target(
+                        js_valid_exports,
+                        combined,
+                        project_dir.name,
+                    )
+                    if js_target:
+                        metadata["target_function"] = js_target
 
                 cases.append(
                     BenchmarkCase(

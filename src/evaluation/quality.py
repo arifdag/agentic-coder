@@ -135,13 +135,18 @@ def compute_relevance_metrics(
     metadata = metadata or {}
     source_file_path = source_file_path or metadata.get("target_file") or metadata.get("code_file")
     target = infer_primary_target(source_code, metadata)
-    analysis_kwargs = dict(test_code=test_code, source_code=source_code, target_function=target)
+    target_source_code = metadata.get("target_source_code") or source_code
+    analysis_kwargs = dict(
+        test_code=test_code,
+        source_code=target_source_code,
+        target_function=target,
+    )
     if source_module is not None:
         analysis_kwargs["source_module"] = source_module
     analysis = analyze_relevance(**analysis_kwargs)
     cov_kwargs = dict(
         coverage_data=coverage_data,
-        source_code=source_code,
+        source_code=target_source_code,
         target_function=target,
         source_file_path=source_file_path,
     )
@@ -287,9 +292,10 @@ def compute_coverage_metrics(
             out["branch_coverage"] = float(branch)
 
     target = infer_primary_target(source_code, metadata)
+    target_source_code = metadata.get("target_source_code") or source_code
     target_cov = compute_target_coverage(
         coverage_data,
-        source_code,
+        target_source_code,
         target_function=target,
         source_file_path=source_file_path,
     )
@@ -297,7 +303,7 @@ def compute_coverage_metrics(
         if value is not None:
             out[key] = value
     out["target"] = target
-    out["source_line_count"] = _source_line_count(source_code)
+    out["source_line_count"] = _source_line_count(target_source_code)
     return out
 
 

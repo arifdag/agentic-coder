@@ -737,15 +737,13 @@ def create_pipeline(config: Optional[Config] = None):
         all_gates = prior_gates + [sandbox_gate.model_dump()]
         if relevance_validator and result.success and task_type == TaskType.UNIT_TEST.value:
             if lang not in JS_LANGUAGES:
+                repo_meta = state.get("repo_metadata") or {}
                 target_gate = relevance_validator.validate_dynamic(
                     test_code=test_code,
-                    source_code=state["code_input"],
+                    source_code=repo_meta.get("target_source_code") or state["code_input"],
                     coverage_data=getattr(result, "coverage_data", None),
                     target_function=state.get("target_function"),
-                    source_file_path=(
-                        (state.get("repo_metadata") or {}).get("target_file")
-                        or (state.get("repo_metadata") or {}).get("code_file")
-                    ),
+                    source_file_path=(repo_meta.get("target_file") or repo_meta.get("code_file")),
                 )
                 all_gates.append(target_gate.model_dump())
 

@@ -125,6 +125,35 @@ def test_target_coverage_matches_repo_source_file_path():
     assert metrics["target_executed_line_count"] == 1
 
 
+def test_target_coverage_uses_target_source_metadata_for_repo_line_numbers():
+    source = (
+        "class Validator:\n"
+        "    pass\n\n"
+        "class Stock:\n"
+        "    def price(self):\n"
+        "        return 1\n"
+    )
+    target_source = "class Stock:\n    def price(self):\n        return 1\n"
+    coverage = {
+        "totals": {"percent_covered": 100.0},
+        "files": {"stock.py": {"executed_lines": [1, 2, 3]}},
+    }
+
+    metrics = compute_coverage_metrics(
+        coverage,
+        source,
+        {
+            "target_function": "Stock",
+            "target_file": "stock.py",
+            "target_source_code": target_source,
+        },
+    )
+
+    assert metrics["target_line_coverage"] == 100.0
+    assert metrics["target_executed_line_count"] > 0
+    assert metrics["source_line_count"] == 3
+
+
 def test_gate_quality_metrics_extract_safety_and_dependency_outcomes():
     gates = [
         {"gate_name": "sast", "passed": False},

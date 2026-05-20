@@ -58,6 +58,8 @@ Requirements:
 - Do not invent methods, properties, validation branches, or error behavior that
   does not appear in the source.
 - Include at least 3-5 focused test cases for the named target or per function
+- For large classes/modules, keep the whole suite compact: 3-8 total tests.
+  Do not enumerate every method, constant, getter, or property.
 - Cover edge cases: empty inputs, null/undefined values, boundary values
 - Test expected exceptions only where the source clearly throws.
 - Use describe() blocks to group tests by function
@@ -82,6 +84,8 @@ Error encountered:
 Repair rules:
 - For assertion/test failures, preserve passing source-grounded tests and remove
   only invalid expectations.
+- If many assertions failed, shrink to a compact 3-8 test suite that checks
+  only constructor/basic return behavior and source-confirmed branches.
 - For TypeError/ReferenceError/import failures, remove calls to nonexistent APIs
   and import only exports that the source actually provides.
 - For SyntaxError or unterminated string/template failures, rebuild the file as

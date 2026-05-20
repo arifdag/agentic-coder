@@ -91,6 +91,9 @@ Guidelines:
    - For string normalization, regex, or translation-table code, derive expected
      outputs from the exact implemented table/range. Do not assume all Unicode
      symbols, punctuation, or whitespace are removed unless the source does that.
+   - Do NOT infer behavior from a target name. For example, a class named Tree
+     is not necessarily a parent/child data structure unless the source defines
+     add_child, traversal, or equality methods.
    - Only test error/exception paths that the source code actually handles.
 
 4. Follow pytest best practices:
@@ -148,6 +151,11 @@ Requirements:
 - For string normalization, regex, or translation-table code, compute expected
   values from the exact source table/range; do not assume all Unicode symbols or
   punctuation are removed.
+- Translation-table rule: if the source table only maps a numeric range such as
+  range(128, 256), characters outside that range must be expected to remain.
+- Do not infer behavior from the target name. Only call methods/operators that
+  are present in the source; e.g. do not assume a class named Tree has add_child,
+  traversal, equality, or remove_child methods unless they are implemented.
 - Use pytest.mark.parametrize for similar test cases.
 - Include at least 3-5 test cases per public function/method.
 
@@ -261,6 +269,10 @@ Repair rules (apply all that match the diagnostics above):
 - For string normalization / regex / translation-table failures, recompute
   expected values from the exact table or character range in the source rather
   than assuming broader cleanup behavior.
+- If a translation table maps only a specific numeric range, preserve characters
+  outside that range in expected values.
+- If failures show AttributeError for methods inferred from a class name, delete
+  those tests and rebuild around methods/attributes actually defined in source.
 - TypeError / AttributeError / NameError / reference error: A test references
   a method, attribute, or name that does not exist in the source. Remove calls
   to nonexistent APIs. Only test functions, methods, and attributes that are

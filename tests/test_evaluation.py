@@ -578,6 +578,8 @@ class TestProjectTestLoader:
         assert case.metadata["target_file"] == "stock.py"
         assert case.metadata["import_module"] == "stock"
         assert case.metadata["target_function"] == "Stock"
+        assert "class Stock" in case.metadata["target_source_code"]
+        assert "class Validator" not in case.metadata["target_source_code"]
 
     def test_javascript_projecttest_flattens_to_commonjs(self, tmp_path):
         from src.evaluation.benchmarks.projecttest import ProjectTestDataset
@@ -602,12 +604,125 @@ class TestProjectTestLoader:
         assert "# ---" not in combined
         assert "import { helper }" not in combined
         assert "export const" not in combined
-        assert "const helper = () => 2" in combined
-        assert "const useHelper = () => helper() + 1" in combined
+        assert "var helper = () => 2" in combined
+        assert "var useHelper = () => helper() + 1" in combined
         assert "module.exports" in combined
         assert "helper" in combined
         assert "useHelper" in combined
         assert case.metadata["target_function"] == "helper"
+
+    def test_javascript_comments_do_not_select_reserved_word_targets(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_js_project(
+            tmp_path,
+            "check",
+            {
+                "check.js": (
+                    "// This helper is used with custom inheritance checks.\n"
+                    "/* Do not treat prose like class with as a target. */\n"
+                    "export const checkCustom = (value) => value === true\n"
+                    "export const isSubclass = (value) => value && value.parent\n"
+                ),
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="javascript")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+
+        assert case.metadata["target_function"] == "checkCustom"
+        assert "with" not in case.code.rsplit("module.exports", 1)[1]
+
+    def test_javascript_commonjs_requires_are_flattened_without_redeclaration(
+        self,
+        tmp_path,
+    ):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_js_project(
+            tmp_path,
+            "circle",
+            {
+                "Shape.js": (
+                    "function Shape(type) { this.type = type }\n" "module.exports = Shape\n"
+                ),
+                "Utils.js": (
+                    "var Utils = { shallowClone: function shallowClone(obj) { return obj } }\n"
+                    "module.exports = Utils\n"
+                ),
+                "vec2.js": "var vec2 = { create: function create() { return [0, 0] } }\n",
+                "Circle.js": (
+                    "var Shape = require('./Shape')\n"
+                    ",    vec2 = require('./vec2')\n"
+                    ",    shallowClone = require('./Utils').shallowClone;\n\n"
+                    "function Circle(radius) {\n"
+                    "  Shape.call(this, 'circle')\n"
+                    "  this.radius = shallowClone({ radius: radius }).radius\n"
+                    "}\n"
+                    "module.exports = Circle\n"
+                ),
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="javascript")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+        combined = case.code
+
+        assert "require('./" not in combined
+        assert "var Shape = require" not in combined
+        assert "var vec2 = require" not in combined
+        assert "var shallowClone = Utils.shallowClone;" in combined
+        assert case.metadata["target_function"] == "Circle"
+
+    def test_javascript_template_export_text_does_not_create_dollar_export(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_js_project(
+            tmp_path,
+            "validate",
+            {
+                "validate.js": (
+                    "const message = `Use export const ${name} = Parent.subclass(name)`\n"
+                    "export const validateSubclass = (value) => Boolean(value)\n"
+                    "export const classesData = []\n"
+                ),
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="javascript")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+        exports = case.code.rsplit("module.exports", 1)[1]
+
+        assert case.metadata["target_function"] == "validateSubclass"
+        assert "\n  $," not in exports
+        assert "validateSubclass" in exports
+
+    def test_javascript_duplicate_esm_helpers_parse_after_flattening(self, tmp_path):
+        from src.evaluation.benchmarks.projecttest import ProjectTestDataset
+
+        data_dir = self._build_fake_js_project(
+            tmp_path,
+            "synergy",
+            {
+                "helpers.js": (
+                    "export const pascalToKebab = (value) => value.toLowerCase()\n"
+                    "export const applyAttribute = (node, name) => pascalToKebab(name)\n"
+                ),
+                "attribute.js": (
+                    "import { applyAttribute } from './helpers.js'\n"
+                    "const pascalToKebab = (value) => value.replace('A', '-a')\n"
+                    "export const attributeToProp = (name) => pascalToKebab(name)\n"
+                ),
+            },
+        )
+        ds = ProjectTestDataset(data_dir=data_dir, language_filter="javascript")
+        ds.download = lambda: data_dir
+        case = ds.load()[0]
+        combined = case.code
+
+        assert "const pascalToKebab" not in combined
+        assert "var pascalToKebab" in combined
+        assert "attributeToProp" in combined
 
 
 # ── Benchmark registry test ──────────────────────────────────────────
