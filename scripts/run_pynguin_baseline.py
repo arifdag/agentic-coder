@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,55 @@ def _timeout_text(value) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Best-effort termination for Pynguin and any surviving worker children."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001 - fallback for platforms without process groups
+        proc.kill()
+
+
+def _run_pynguin_command(
+    cmd: list[str],
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> tuple[int | None, str, str, bool]:
+    """Run Pynguin with a hard timeout that kills the whole process tree."""
+    popen_kwargs: dict[str, Any] = {
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        return proc.returncode, stdout or "", stderr or "", False
+    except subprocess.TimeoutExpired as exc:
+        _kill_process_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout = _timeout_text(exc.stdout)
+            stderr = _timeout_text(exc.stderr)
+        return None, stdout or _timeout_text(exc.stdout), stderr or _timeout_text(exc.stderr), True
 
 
 def _build_quality_payload(
@@ -181,25 +231,12 @@ def _run_case(
         ]
         env = dict(os.environ)
         env.setdefault("PYNGUIN_DANGER_AWARE", "YES")
-        timed_out = False
         timeout_seconds = seconds + 30
-        try:
-            completed = subprocess.run(
-                cmd,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-            returncode = completed.returncode
-            stdout = completed.stdout
-            stderr = completed.stderr
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            returncode = None
-            stdout = _timeout_text(exc.stdout)
-            stderr = _timeout_text(exc.stderr)
+        returncode, stdout, stderr, timed_out = _run_pynguin_command(
+            cmd,
+            env,
+            timeout_seconds,
+        )
 
         test_code = _generated_tests(output_dir)
         if not test_code.strip():
@@ -286,6 +323,16 @@ def main():
         default=25,
         help="Upper bound on mutants generated in full quality mode (default: 25)",
     )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Reuse existing per-case JSON results and continue with missing cases",
+    )
+    parser.add_argument(
+        "--failed-only",
+        action="store_true",
+        help="Run only cases whose existing result is failed or missing",
+    )
     args = parser.parse_args()
 
     dataset = get_dataset(args.benchmark, data_dir=Path(args.data_dir))
@@ -296,6 +343,15 @@ def main():
 
     results = []
     for case in cases:
+        result_path = result_dir / f"{case.id}.json"
+        if result_path.is_file() and (args.skip_existing or args.failed_only):
+            existing = EvalResult.model_validate_json(result_path.read_text(encoding="utf-8"))
+            if args.skip_existing or (args.failed_only and existing.passed):
+                results.append(existing)
+                print(f"[skip] {case.id}")
+                continue
+
+        print(f"[run] {case.id}", flush=True)
         result = _run_case(
             case,
             sandbox_config,
@@ -304,7 +360,7 @@ def main():
             mutation_max_mutants=args.mutation_max_mutants,
         )
         results.append(result)
-        (result_dir / f"{case.id}.json").write_text(
+        result_path.write_text(
             result.model_dump_json(indent=2),
             encoding="utf-8",
         )

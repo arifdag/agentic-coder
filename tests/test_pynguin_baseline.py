@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from types import SimpleNamespace
 
 import scripts.run_pynguin_baseline as pynguin_baseline
@@ -20,15 +19,10 @@ def _case() -> BenchmarkCase:
 
 
 def test_pynguin_timeout_without_generated_tests_returns_eval_error(monkeypatch):
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(
-            cmd=kwargs.get("args") or "pynguin",
-            timeout=kwargs["timeout"],
-            output="partial stdout",
-            stderr="partial stderr",
-        )
+    def fake_run_pynguin(cmd, env, timeout_seconds):
+        return None, "partial stdout", "partial stderr", True
 
-    monkeypatch.setattr(pynguin_baseline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pynguin_baseline, "_run_pynguin_command", fake_run_pynguin)
 
     result = pynguin_baseline._run_case(_case(), SandboxConfig.from_env(), seconds=1)
 
@@ -40,8 +34,8 @@ def test_pynguin_timeout_without_generated_tests_returns_eval_error(monkeypatch)
 
 
 def test_pynguin_timeout_with_generated_tests_evaluates_partial_output(monkeypatch):
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="pynguin", timeout=kwargs["timeout"])
+    def fake_run_pynguin(cmd, env, timeout_seconds):
+        return None, "", "", True
 
     class FakeSandboxExecutor:
         def __init__(self, config):
@@ -57,7 +51,7 @@ def test_pynguin_timeout_with_generated_tests_evaluates_partial_output(monkeypat
                 stderr="",
             )
 
-    monkeypatch.setattr(pynguin_baseline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pynguin_baseline, "_run_pynguin_command", fake_run_pynguin)
     monkeypatch.setattr(
         pynguin_baseline,
         "_generated_tests",
@@ -77,8 +71,8 @@ def test_pynguin_timeout_with_generated_tests_evaluates_partial_output(monkeypat
 
 
 def test_pynguin_fast_quality_metrics_are_attached(monkeypatch):
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    def fake_run_pynguin(cmd, env, timeout_seconds):
+        return 0, "", "", False
 
     class FakeSandboxExecutor:
         def __init__(self, config):
@@ -108,7 +102,7 @@ def test_pynguin_fast_quality_metrics_are_attached(monkeypatch):
                 stderr="",
             )
 
-    monkeypatch.setattr(pynguin_baseline.subprocess, "run", fake_run)
+    monkeypatch.setattr(pynguin_baseline, "_run_pynguin_command", fake_run_pynguin)
     monkeypatch.setattr(
         pynguin_baseline,
         "_generated_tests",
