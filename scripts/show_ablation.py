@@ -25,16 +25,31 @@ def main(root: str = "eval_results_ablation/ablation/ult") -> None:
         print("no completed variants yet")
         return
 
-    hdr = f"{'variant':42} {'cases-pass':>10} {'test-pass':>10} {'coverage':>10} {'iters':>7} {'time(s)':>8}"
+    hdr = (
+        f"{'variant':55} {'case-pass':>10} {'test-pass':>10} "
+        f"{'target':>10} {'mutation':>10} {'rel':>8} {'gaming':>8} "
+        f"{'iters':>7} {'time(s)':>8}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for name, m in rows:
         cp = m.get("pass_rate", 0) * 100
         tp = m.get("test_pass_rate", 0) * 100
-        cov = m.get("avg_coverage") or 0.0
+        target = m.get("avg_target_line_coverage")
+        mutation = m.get("mutation_score")
+        rel = m.get("relevance_pass_rate")
+        gaming = m.get("gaming_rate")
         it = m.get("avg_iterations") or 0.0
         tm = m.get("avg_time") or 0.0
-        print(f"{name:42} {cp:>9.1f}% {tp:>9.1f}% {cov:>9.1f}% {it:>7.2f} {tm:>8.1f}")
+        target_s = f"{target:>9.1f}%" if target is not None else f"{'N/A':>10}"
+        mutation_s = f"{mutation * 100:>9.1f}%" if mutation is not None else f"{'N/A':>10}"
+        rel_s = f"{rel * 100:>7.1f}%" if rel is not None else f"{'N/A':>8}"
+        gaming_s = f"{gaming * 100:>7.1f}%" if gaming is not None else f"{'N/A':>8}"
+        print(
+            f"{name:55} {cp:>9.1f}% {tp:>9.1f}% "
+            f"{target_s} {mutation_s} {rel_s} {gaming_s} "
+            f"{it:>7.2f} {tm:>8.1f}"
+        )
 
 
 if __name__ == "__main__":

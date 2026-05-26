@@ -1,13 +1,20 @@
-"""Full ablation analysis: 32 variants, all 4 axes, including marginal effects."""
-import json, pathlib, re, statistics
+"""Full ablation analysis for legacy 4-axis or relevance-aware 5-axis sweeps."""
+import json, pathlib, re, statistics, sys
 
-ROOT = pathlib.Path('eval_results_paper_ablation/ablation/ult')
+ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else 'eval_results_paper_ablation/ablation/ult')
+VARIANT_RE = re.compile(
+    r'sast=(on|off)_dep=(on|off)_judge=(on|off)(?:_rel=(on|off))?_k=(\d+)'
+)
 
 
 def load_variant(folder: pathlib.Path) -> dict:
     name = folder.name
-    m = re.match(r'sast=(on|off)_dep=(on|off)_judge=(on|off)_k=(\d+)', name)
-    sast, dep, judge, k = m.group(1), m.group(2), m.group(3), int(m.group(4))
+    m = VARIANT_RE.match(name)
+    if not m:
+        return None
+    sast, dep, judge = m.group(1), m.group(2), m.group(3)
+    rel = m.group(4) or 'base'
+    k = int(m.group(5))
 
     cases = sorted((folder / 'ult').glob('ult-*.json'))
     if not cases:
@@ -36,7 +43,7 @@ def load_variant(folder: pathlib.Path) -> dict:
             cov.append(d['coverage'])
 
     return {
-        'sast': sast, 'dep': dep, 'judge': judge, 'k': k,
+        'sast': sast, 'dep': dep, 'judge': judge, 'rel': rel, 'k': k,
         'n': n, 'passed': passed,
         'case_pass': passed / n if n else 0,
         'tests_run': tests_r, 'tests_passed': tests_p,
@@ -46,6 +53,9 @@ def load_variant(folder: pathlib.Path) -> dict:
         'rl': rl,
     }
 
+
+if not ROOT.exists():
+    raise SystemExit(f"no such directory: {ROOT}")
 
 variants = [load_variant(d) for d in sorted(ROOT.iterdir()) if d.is_dir()]
 variants = [v for v in variants if v]
@@ -59,17 +69,22 @@ print(f"Rate-limit-contaminated cases: {total_rl}\n")
 print("== Top 10 variants by case-pass ==")
 print(f"{'rank':<5} {'variant':<38} {'case':>7} {'test':>7} {'iter':>6} {'rl':>3}")
 for i, v in enumerate(sorted(variants, key=lambda x: -x['case_pass'])[:10], 1):
-    name = f"sast={v['sast']:<3} dep={v['dep']:<3} judge={v['judge']:<3} k={v['k']}"
+    rel_part = '' if v['rel'] == 'base' else f" rel={v['rel']:<3}"
+    name = f"sast={v['sast']:<3} dep={v['dep']:<3} judge={v['judge']:<3}{rel_part} k={v['k']}"
     print(f"{i:<5} {name:<38} {v['case_pass']*100:>6.1f}% {v['test_pass']*100:>6.1f}% {v['avg_iter']:>6.2f} {v['rl']:>3}")
 
 print("\n== Bottom 10 variants by case-pass ==")
 for i, v in enumerate(sorted(variants, key=lambda x: x['case_pass'])[:10], 1):
-    name = f"sast={v['sast']:<3} dep={v['dep']:<3} judge={v['judge']:<3} k={v['k']}"
+    rel_part = '' if v['rel'] == 'base' else f" rel={v['rel']:<3}"
+    name = f"sast={v['sast']:<3} dep={v['dep']:<3} judge={v['judge']:<3}{rel_part} k={v['k']}"
     print(f"{i:<5} {name:<38} {v['case_pass']*100:>6.1f}% {v['test_pass']*100:>6.1f}% {v['avg_iter']:>6.2f} {v['rl']:>3}")
 
 # Marginal effect of each axis
 print("\n== Marginal effect of each axis (mean case-pass) ==")
-for axis in ['sast', 'dep', 'judge']:
+axes = ['sast', 'dep', 'judge']
+if any(v['rel'] != 'base' for v in variants):
+    axes.append('rel')
+for axis in axes:
     on_runs = [v['case_pass'] for v in variants if v[axis] == 'on' and v['rl'] == 0]
     off_runs = [v['case_pass'] for v in variants if v[axis] == 'off' and v['rl'] == 0]
     on_mean = statistics.mean(on_runs) * 100 if on_runs else 0
@@ -88,20 +103,31 @@ for k in [0, 1, 3, 5]:
 print("\n== Best variant at each k ==")
 for k in [0, 1, 3, 5]:
     best = max([v for v in variants if v['k'] == k], key=lambda x: x['case_pass'])
-    name = f"sast={best['sast']:<3} dep={best['dep']:<3} judge={best['judge']:<3}"
+    rel_part = '' if best['rel'] == 'base' else f" rel={best['rel']:<3}"
+    name = f"sast={best['sast']:<3} dep={best['dep']:<3} judge={best['judge']:<3}{rel_part}"
     print(f"  k={k}  {name}  case={best['case_pass']*100:.1f}%  test={best['test_pass']*100:.1f}%")
 
 # Worst per k
 print("\n== Worst variant at each k ==")
 for k in [0, 1, 3, 5]:
     worst = min([v for v in variants if v['k'] == k], key=lambda x: x['case_pass'])
-    name = f"sast={worst['sast']:<3} dep={worst['dep']:<3} judge={worst['judge']:<3}"
+    rel_part = '' if worst['rel'] == 'base' else f" rel={worst['rel']:<3}"
+    name = f"sast={worst['sast']:<3} dep={worst['dep']:<3} judge={worst['judge']:<3}{rel_part}"
     print(f"  k={k}  {name}  case={worst['case_pass']*100:.1f}%  test={worst['test_pass']*100:.1f}%")
 
 # All-off baseline vs all-on full pipeline
 print("\n== Headline comparison ==")
-no_pipeline = next(v for v in variants if v['sast']=='off' and v['dep']=='off' and v['judge']=='off' and v['k']==0)
-full_pipe   = next(v for v in variants if v['sast']=='on'  and v['dep']=='on'  and v['judge']=='on'  and v['k']==5)
+has_rel_axis = any(v['rel'] != 'base' for v in variants)
+no_pipeline = next(
+    v for v in variants
+    if v['sast']=='off' and v['dep']=='off' and v['judge']=='off'
+    and (not has_rel_axis or v['rel']=='off') and v['k']==0
+)
+full_pipe = next(
+    v for v in variants
+    if v['sast']=='on' and v['dep']=='on' and v['judge']=='on'
+    and (not has_rel_axis or v['rel']=='on') and v['k']==5
+)
 print(f"  Bare LLM (no gates, k=0)        : case={no_pipeline['case_pass']*100:>5.1f}%  test={no_pipeline['test_pass']*100:>5.1f}%  rl={no_pipeline['rl']}")
 print(f"  Full pipeline (all gates, k=5)  : case={full_pipe['case_pass']*100:>5.1f}%  test={full_pipe['test_pass']*100:>5.1f}%  rl={full_pipe['rl']}")
 print(f"  ABSOLUTE GAIN                   : case=+{(full_pipe['case_pass']-no_pipeline['case_pass'])*100:.1f}pp  test=+{(full_pipe['test_pass']-no_pipeline['test_pass'])*100:.1f}pp")
@@ -109,5 +135,9 @@ print(f"  ABSOLUTE GAIN                   : case=+{(full_pipe['case_pass']-no_pi
 # Diminishing returns
 print("\n== Repair loop diminishing returns (full gates) ==")
 for k in [0, 1, 3, 5]:
-    v = next(x for x in variants if x['sast']=='on' and x['dep']=='on' and x['judge']=='on' and x['k']==k)
+    v = next(
+        x for x in variants
+        if x['sast']=='on' and x['dep']=='on' and x['judge']=='on'
+        and (not has_rel_axis or x['rel']=='on') and x['k']==k
+    )
     print(f"  k={k}  case={v['case_pass']*100:>5.1f}%  test={v['test_pass']*100:>5.1f}%  iter={v['avg_iter']:.2f}")

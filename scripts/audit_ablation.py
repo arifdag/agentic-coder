@@ -38,12 +38,12 @@ def main() -> None:
         n = len(files)
         rows.append((d.name, n, rate_limited, no_gates, no_sandbox, ok))
 
-    hdr = f"{'variant':42} {'N':>3} {'rate-lim':>8} {'no-gates':>9} {'no-sandbox':>11} {'ok':>4}"
+    hdr = f"{'variant':55} {'N':>3} {'rate-lim':>8} {'no-gates':>9} {'no-sandbox':>11} {'ok':>4}"
     print(hdr)
     print("-" * len(hdr))
     total_rl = 0
     for name, n, rl, ng, ns, ok in rows:
-        print(f"{name:42} {n:>3} {rl:>8} {ng:>9} {ns:>11} {ok:>4}")
+        print(f"{name:55} {n:>3} {rl:>8} {ng:>9} {ns:>11} {ok:>4}")
         total_rl += rl
     print("-" * len(hdr))
     print(f"TOTAL rate-limited cases: {total_rl}")

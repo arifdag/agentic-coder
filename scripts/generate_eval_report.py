@@ -127,7 +127,10 @@ def generate() -> None:
     lines.append("")
     lines.append("This report summarizes:")
     lines.append("- `eval_results_phase6_v2` benchmark outcomes")
-    lines.append("- `eval_results_ablation/ablation/ult` full 32-variant ablation sweep")
+    lines.append(
+        f"- `eval_results_ablation/ablation/ult` ablation sweep "
+        f"({len(ab_rows)} completed variants)"
+    )
     lines.append("")
     lines.append("## Audit Findings (apply before re-running the full test set)")
     lines.append("")
@@ -158,7 +161,7 @@ def generate() -> None:
     )
     lines.append(
         "3. **Ablation metrics counted 429/rate-limit provider errors as "
-        "pipeline failures.** All four `sast=off_dep=off_judge=off_*` "
+        "pipeline failures.** All `sast=off_dep=off_judge=off*` "
         "variants are 100% 429 errors from Groq's daily quota, and "
         "several other variants are 10-70% contaminated. The original "
         'claim "without gates the pipeline collapses to 0%" is therefore '
@@ -242,12 +245,12 @@ def generate() -> None:
     )
     lines.append("")
 
-    lines.append("## ULT Ablation Summary (32 Variants)")
+    lines.append(f"## ULT Ablation Summary ({len(ab_rows)} Variants)")
     lines.append("")
     total_rl = sum(r["rate_limited"] for r in ab_rows)
     if total_rl:
         lines.append(
-            f"> **Caveat:** {total_rl} per-case entries across the 32 variants "
+            f"> **Caveat:** {total_rl} per-case entries across the ablation variants "
             "are upstream provider 429 / rate-limit errors, not real "
             "pipeline outcomes. Variants marked with a non-zero `RL` column "
             "are partially or fully contaminated and should be re-run before "
@@ -336,7 +339,7 @@ def generate() -> None:
         "- Benchmark, N cases, case-pass, pooled test-pass, avg coverage, avg iterations, avg runtime."
     )
     lines.append(
-        "- Ablation axis values (sast/dep/judge/k), case-pass, pooled test-pass, coverage."
+        "- Ablation axis values (sast/dep/judge/relevance/k), case-pass, pooled test-pass, coverage."
     )
 
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")

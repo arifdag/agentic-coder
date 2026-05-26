@@ -3,12 +3,13 @@
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from src.config import EvalConfig
-from src.evaluation.ablation import generate_variants
+from src.evaluation.ablation import AblationRunner, generate_variants
 from src.evaluation.benchmarks import get_dataset
 from src.evaluation.benchmarks.custom_security import CustomSecurityDataset
 from src.evaluation.benchmarks.dep_hallucination import DepHallucinationDataset
@@ -153,7 +154,14 @@ class TestEvalMetrics:
                     "mutants_survived": 1,
                     "mutants_uncovered": 1,
                 },
-                relevance_metrics={"relevance_pass": True, "gaming_flag": False},
+                relevance_metrics={
+                    "relevance_pass": True,
+                    "direct_target_relevance": True,
+                    "indirect_target_relevance": False,
+                    "assertion_relevance": True,
+                    "target_coverage_relevance": 0.9,
+                    "gaming_flag": False,
+                },
                 reliability_metrics={"reliable": True, "flaky": False},
                 oracle_metrics={"has_assertions": True, "assertion_count": 4, "test_count": 2},
                 safety_metrics={"expected_vulnerable": True, "vulnerability_detected": True},
@@ -171,7 +179,14 @@ class TestEvalMetrics:
                     "target_branch_coverage": 25.0,
                 },
                 mutation_metrics={"mutants_killed": 1, "mutants_survived": 4},
-                relevance_metrics={"relevance_pass": False, "gaming_flag": True},
+                relevance_metrics={
+                    "relevance_pass": False,
+                    "direct_target_relevance": False,
+                    "indirect_target_relevance": True,
+                    "assertion_relevance": False,
+                    "target_coverage_relevance": 0.0,
+                    "gaming_flag": True,
+                },
                 reliability_metrics={"reliable": False, "flaky": True},
                 oracle_metrics={"has_assertions": False, "assertion_count": 0, "test_count": 1},
                 safety_metrics={"expected_vulnerable": True, "vulnerability_detected": False},
@@ -191,6 +206,10 @@ class TestEvalMetrics:
         assert m.mutation_score == pytest.approx(5 / 10)
         assert m.mutation_coverage == pytest.approx(10 / 11)
         assert m.relevance_pass_rate == 0.5
+        assert m.direct_target_relevance_rate == 0.5
+        assert m.indirect_target_relevance_rate == 0.5
+        assert m.assertion_relevance_rate == 0.5
+        assert m.avg_target_coverage_relevance == pytest.approx(0.45)
         assert m.gaming_rate == 0.5
         assert m.reliability_rate == 0.5
         assert m.flakiness_rate == 0.5
@@ -256,10 +275,48 @@ class TestEvalMetrics:
 
 class TestAblationConfig:
     def test_creation(self):
-        a = AblationConfig(name="test", sast_enabled=False, retry_budget=1)
+        a = AblationConfig(
+            name="test",
+            sast_enabled=False,
+            relevance_enabled=False,
+            retry_budget=1,
+        )
         assert a.name == "test"
         assert a.sast_enabled is False
+        assert a.relevance_enabled is False
         assert a.retry_budget == 1
+
+    def test_apply_variant_toggles_relevance_gate(self, tmp_path):
+        base = SimpleNamespace(
+            sast=SimpleNamespace(enabled=True),
+            dependency=SimpleNamespace(enabled=True),
+            judge=SimpleNamespace(enabled=True),
+            relevance=SimpleNamespace(enabled=True),
+            pipeline=SimpleNamespace(max_retries=5),
+        )
+        runner = AblationRunner(
+            base_config=base,
+            dataset=SimpleNamespace(name="demo"),
+            results_dir=str(tmp_path),
+        )
+
+        cfg = runner._apply_variant(
+            base,
+            AblationConfig(
+                name="rel_off",
+                sast_enabled=False,
+                dependency_enabled=False,
+                judge_enabled=False,
+                relevance_enabled=False,
+                retry_budget=0,
+            ),
+        )
+
+        assert cfg.sast.enabled is False
+        assert cfg.dependency.enabled is False
+        assert cfg.judge.enabled is False
+        assert cfg.relevance.enabled is False
+        assert cfg.pipeline.max_retries == 0
 
 
 # ── Custom benchmark loader tests ────────────────────────────────────
@@ -746,19 +803,24 @@ class TestBenchmarkRegistry:
 class TestAblationVariants:
     def test_full_grid(self):
         variants = generate_variants()
-        assert len(variants) == 2 * 2 * 2 * 4  # 32
+        assert len(variants) == 2 * 2 * 2 * 2 * 4  # 64
+        assert any(v.relevance_enabled is False for v in variants)
+        assert any("_rel=off_" in v.name for v in variants)
 
     def test_single_axis(self):
         variants = generate_variants(axes=["retries"])
         assert len(variants) == 4
         budgets = {v.retry_budget for v in variants}
         assert budgets == {0, 1, 3, 5}
+        assert {v.relevance_enabled for v in variants} == {None}
 
     def test_two_axes(self):
-        variants = generate_variants(axes=["sast", "judge"])
-        assert len(variants) == 4
+        variants = generate_variants(axes=["sast", "judge", "relevance"])
+        assert len(variants) == 8
         sast_vals = {v.sast_enabled for v in variants}
         assert sast_vals == {True, False}
+        rel_vals = {v.relevance_enabled for v in variants}
+        assert rel_vals == {True, False}
 
     def test_variant_names_unique(self):
         variants = generate_variants()

@@ -112,6 +112,10 @@ class EvalMetrics(BaseModel):
     mutation_coverage: Optional[float] = None
     bug_detection_rate: Optional[float] = None
     relevance_pass_rate: Optional[float] = None
+    direct_target_relevance_rate: Optional[float] = None
+    indirect_target_relevance_rate: Optional[float] = None
+    assertion_relevance_rate: Optional[float] = None
+    avg_target_coverage_relevance: Optional[float] = None
     gaming_rate: Optional[float] = None
     sast_catch_rate: Optional[float] = None
     vulnerability_escape_rate: Optional[float] = None
@@ -231,6 +235,36 @@ class EvalMetrics(BaseModel):
             sum(1 for r in relevance_eligible if bool(r.relevance_metrics.get("relevance_pass"))),
             len(relevance_eligible),
         )
+        direct_target_relevance_rate = _rate(
+            sum(
+                1
+                for r in relevance_eligible
+                if bool(r.relevance_metrics.get("direct_target_relevance"))
+            ),
+            len(relevance_eligible),
+        )
+        indirect_target_relevance_rate = _rate(
+            sum(
+                1
+                for r in relevance_eligible
+                if bool(r.relevance_metrics.get("indirect_target_relevance"))
+            ),
+            len(relevance_eligible),
+        )
+        assertion_relevance_rate = _rate(
+            sum(
+                1
+                for r in relevance_eligible
+                if bool(r.relevance_metrics.get("assertion_relevance"))
+            ),
+            len(relevance_eligible),
+        )
+        target_coverage_relevance_values = [
+            v
+            for r in relevance_eligible
+            if (v := _number(r.relevance_metrics.get("target_coverage_relevance")))
+            is not None
+        ]
         gaming_rate = _rate(
             sum(1 for r in relevance_eligible if bool(r.relevance_metrics.get("gaming_flag"))),
             len(relevance_eligible),
@@ -338,6 +372,10 @@ class EvalMetrics(BaseModel):
             mutation_coverage=mutation_coverage,
             bug_detection_rate=bug_detection_rate,
             relevance_pass_rate=relevance_pass_rate,
+            direct_target_relevance_rate=direct_target_relevance_rate,
+            indirect_target_relevance_rate=indirect_target_relevance_rate,
+            assertion_relevance_rate=assertion_relevance_rate,
+            avg_target_coverage_relevance=_mean(target_coverage_relevance_values),
             gaming_rate=gaming_rate,
             sast_catch_rate=sast_catch_rate,
             vulnerability_escape_rate=vulnerability_escape_rate,
@@ -395,6 +433,20 @@ class EvalMetrics(BaseModel):
             lines.append(f"| Bug detection rate | {self.bug_detection_rate:.1%} |")
         if self.relevance_pass_rate is not None:
             lines.append(f"| Relevance pass rate | {self.relevance_pass_rate:.1%} |")
+        if self.direct_target_relevance_rate is not None:
+            lines.append(
+                f"| Direct target relevance | {self.direct_target_relevance_rate:.1%} |"
+            )
+        if self.indirect_target_relevance_rate is not None:
+            lines.append(
+                f"| Indirect target relevance | {self.indirect_target_relevance_rate:.1%} |"
+            )
+        if self.assertion_relevance_rate is not None:
+            lines.append(f"| Assertion relevance | {self.assertion_relevance_rate:.1%} |")
+        if self.avg_target_coverage_relevance is not None:
+            lines.append(
+                f"| Avg target coverage relevance | {self.avg_target_coverage_relevance:.1%} |"
+            )
         if self.gaming_rate is not None:
             lines.append(f"| Gaming rate | {self.gaming_rate:.1%} |")
         if self.reliability_rate is not None:
@@ -432,6 +484,7 @@ class AblationConfig(BaseModel):
     sast_enabled: bool = True
     dependency_enabled: bool = True
     judge_enabled: bool = True
+    relevance_enabled: Optional[bool] = None
     retry_budget: int = 3
     description: str = ""
 

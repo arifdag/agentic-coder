@@ -16,6 +16,9 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 ABL = pathlib.Path("eval_results_paper_ablation/ablation/ult")
+VARIANT_RE = re.compile(
+    r"sast=(on|off)_dep=(on|off)_judge=(on|off)(?:_rel=(on|off))?_k=(\d+)"
+)
 _TEST_NAME_RE = re.compile(r"test_generated\.py::([\w:]+)::([\w\[\]\-]+)")
 NETWORK = ("getaddrinfo", "name or service not known", "connection reset",
            "winerror", "remote protocol", "server disconnected")
@@ -94,6 +97,13 @@ def variant_stats(folder: pathlib.Path) -> dict:
     }
 
 
+def variant_dir(*, sast: str, dep: str, judge: str, rel: str, k: int) -> pathlib.Path:
+    relevance_aware = ABL / f"sast={sast}_dep={dep}_judge={judge}_rel={rel}_k={k}"
+    if relevance_aware.exists():
+        return relevance_aware
+    return ABL / f"sast={sast}_dep={dep}_judge={judge}_k={k}"
+
+
 print("\n=== HEADLINE: No gates vs All gates, at each repair depth k ===\n")
 hdr = (
     f"{'k':>2}  {'setting':<10}  {'N':>3}  "
@@ -103,8 +113,8 @@ hdr = (
 print(hdr)
 print("-" * len(hdr))
 for k in (0, 1, 3, 5):
-    no = variant_stats(ABL / f"sast=off_dep=off_judge=off_k={k}")
-    al = variant_stats(ABL / f"sast=on_dep=on_judge=on_k={k}")
+    no = variant_stats(variant_dir(sast="off", dep="off", judge="off", rel="off", k=k))
+    al = variant_stats(variant_dir(sast="on", dep="on", judge="on", rel="on", k=k))
     for tag, s in (("no gates", no), ("all gates", al)):
         print(
             f"{k:>2}  {tag:<10}  {s['n']:>3}  "
@@ -129,19 +139,30 @@ all_variants = []
 for v_dir in ABL.iterdir():
     if not v_dir.is_dir():
         continue
-    m = re.match(r"sast=(on|off)_dep=(on|off)_judge=(on|off)_k=(\d+)", v_dir.name)
+    m = VARIANT_RE.match(v_dir.name)
     if not m:
         continue
     s = variant_stats(v_dir)
     if s["n"] < 5:
         continue
-    s.update({"sast": m.group(1), "dep": m.group(2), "judge": m.group(3), "k": int(m.group(4))})
+    s.update(
+        {
+            "sast": m.group(1),
+            "dep": m.group(2),
+            "judge": m.group(3),
+            "rel": m.group(4) or "base",
+            "k": int(m.group(5)),
+        }
+    )
     all_variants.append(s)
 
 print(f"{'gate':<8}  {'on case-pass':>14}  {'off case-pass':>14}  {'delta':>9}  "
       f"{'on relevance':>14}  {'off relevance':>14}  {'delta':>9}")
 print("-" * 100)
-for axis in ("sast", "dep", "judge"):
+axes = ["sast", "dep", "judge"]
+if any(v["rel"] != "base" for v in all_variants):
+    axes.append("rel")
+for axis in axes:
     on = [v for v in all_variants if v[axis] == "on"]
     off = [v for v in all_variants if v[axis] == "off"]
     on_cp = sum(v["case_pass"] for v in on) / len(on)

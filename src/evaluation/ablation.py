@@ -24,21 +24,31 @@ def generate_variants(
         sast      -- SAST on/off
         dependency -- dependency check on/off
         judge     -- LLM judge on/off
+        relevance -- target relevance/anti-gaming gate on/off
         retries   -- retry budget k in {0,1,3,5}
     """
-    axes = axes or ["sast", "dependency", "judge", "retries"]
+    axes = axes or ["sast", "dependency", "judge", "relevance", "retries"]
 
     sast_vals = [True, False] if "sast" in axes else [True]
     dep_vals = [True, False] if "dependency" in axes else [True]
     judge_vals = [True, False] if "judge" in axes else [True]
+    relevance_vals: list[Optional[bool]] = [True, False] if "relevance" in axes else [None]
     retry_vals = RETRY_BUDGETS if "retries" in axes else [3]
 
     variants: List[AblationConfig] = []
-    for sast, dep, judge, k in itertools.product(sast_vals, dep_vals, judge_vals, retry_vals):
+    for sast, dep, judge, relevance, k in itertools.product(
+        sast_vals,
+        dep_vals,
+        judge_vals,
+        relevance_vals,
+        retry_vals,
+    ):
         parts = []
         parts.append(f"sast={'on' if sast else 'off'}")
         parts.append(f"dep={'on' if dep else 'off'}")
         parts.append(f"judge={'on' if judge else 'off'}")
+        if relevance is not None:
+            parts.append(f"rel={'on' if relevance else 'off'}")
         parts.append(f"k={k}")
         name = "_".join(parts)
 
@@ -48,6 +58,7 @@ def generate_variants(
                 sast_enabled=sast,
                 dependency_enabled=dep,
                 judge_enabled=judge,
+                relevance_enabled=relevance,
                 retry_budget=k,
                 description=name.replace("_", ", "),
             )
@@ -77,6 +88,8 @@ class AblationRunner:
         cfg.sast.enabled = variant.sast_enabled
         cfg.dependency.enabled = variant.dependency_enabled
         cfg.judge.enabled = variant.judge_enabled
+        if variant.relevance_enabled is not None:
+            cfg.relevance.enabled = variant.relevance_enabled
         cfg.pipeline.max_retries = variant.retry_budget
         # coding_role / judge_role are left unchanged -> judge is pinned.
         return cfg
@@ -86,6 +99,8 @@ class AblationRunner:
         max_cases_per_variant: Optional[int] = None,
         axes: Optional[List[str]] = None,
         only_variants: Optional[List[str]] = None,
+        skip_existing: bool = False,
+        failed_only: bool = False,
     ) -> Dict[str, EvalMetrics]:
         """Run the ablation sweep.
 
@@ -96,7 +111,9 @@ class AblationRunner:
             entries in this list are executed. Useful for re-running a
             small set of contaminated variants without redoing the whole
             32-variant sweep. Names use the canonical
-            ``sast=<on|off>_dep=<on|off>_judge=<on|off>_k=<int>`` form.
+            ``sast=<on|off>_dep=<on|off>_judge=<on|off>_rel=<on|off>_k=<int>``
+            form when the relevance axis is enabled. Legacy four-axis
+            names omit the ``rel=`` part.
         """
         variants = generate_variants(axes)
         if only_variants:
@@ -108,7 +125,9 @@ class AblationRunner:
             if not variants:
                 raise ValueError(
                     f"No matching variants for filter {sorted(wanted)}. "
-                    f"Hint: variant names look like 'sast=off_dep=off_judge=off_k=0'."
+                    "Hint: variant names look like "
+                    "'sast=off_dep=off_judge=off_rel=off_k=0' when the "
+                    "relevance axis is enabled."
                 )
         log.info("Running %d ablation variants on %s", len(variants), self.dataset.name)
 
@@ -121,7 +140,11 @@ class AblationRunner:
                 dataset=self.dataset,
                 results_dir=str(self.results_dir / variant.name),
             )
-            runner.run(max_cases=max_cases_per_variant)
+            runner.run(
+                max_cases=max_cases_per_variant,
+                skip_existing=skip_existing,
+                failed_only=failed_only,
+            )
             metrics = runner.summarize()
             metrics.dataset_name = f"{self.dataset.name}/{variant.name}"
             self._variant_metrics[variant.name] = metrics
@@ -166,6 +189,26 @@ class AblationRunner:
                     "relevance_pass_rate": (
                         round(m.relevance_pass_rate, 4)
                         if m.relevance_pass_rate is not None
+                        else None
+                    ),
+                    "direct_target_relevance_rate": (
+                        round(m.direct_target_relevance_rate, 4)
+                        if m.direct_target_relevance_rate is not None
+                        else None
+                    ),
+                    "indirect_target_relevance_rate": (
+                        round(m.indirect_target_relevance_rate, 4)
+                        if m.indirect_target_relevance_rate is not None
+                        else None
+                    ),
+                    "assertion_relevance_rate": (
+                        round(m.assertion_relevance_rate, 4)
+                        if m.assertion_relevance_rate is not None
+                        else None
+                    ),
+                    "avg_target_coverage_relevance": (
+                        round(m.avg_target_coverage_relevance, 4)
+                        if m.avg_target_coverage_relevance is not None
                         else None
                     ),
                     "gaming_rate": round(m.gaming_rate, 4) if m.gaming_rate is not None else None,
@@ -215,8 +258,8 @@ class AblationRunner:
             )
         md_lines.extend(
             [
-                "| Variant | Total | Passed | Case pass | Target line | Target branch | Mutation | Gaming | Avg iter | Avg time |",
-                "|---------|-------|--------|-----------|-------------|---------------|----------|--------|----------|----------|",
+                "| Variant | Total | Passed | Case pass | Target line | Target branch | Mutation | Relevance | Direct target | Assertions | Gaming | Avg iter | Avg time |",
+                "|---------|-------|--------|-----------|-------------|---------------|----------|-----------|---------------|------------|--------|----------|----------|",
             ]
         )
         for r in rows:
@@ -231,10 +274,26 @@ class AblationRunner:
                 else "N/A"
             )
             mutation = f"{r['mutation_score']:.1%}" if r["mutation_score"] is not None else "N/A"
+            relevance = (
+                f"{r['relevance_pass_rate']:.1%}"
+                if r["relevance_pass_rate"] is not None
+                else "N/A"
+            )
+            direct = (
+                f"{r['direct_target_relevance_rate']:.1%}"
+                if r["direct_target_relevance_rate"] is not None
+                else "N/A"
+            )
+            assertions = (
+                f"{r['assertion_presence_rate']:.1%}"
+                if r["assertion_presence_rate"] is not None
+                else "N/A"
+            )
             gaming = f"{r['gaming_rate']:.1%}" if r["gaming_rate"] is not None else "N/A"
             md_lines.append(
                 f"| {r['variant']} | {r['total']} | {r['passed']} | {r['pass_rate']:.1%} "
-                f"| {target_line} | {target_branch} | {mutation} | {gaming} "
+                f"| {target_line} | {target_branch} | {mutation} | {relevance} "
+                f"| {direct} | {assertions} | {gaming} "
                 f"| {r['avg_iterations']} | {r['avg_time']}s |"
             )
 

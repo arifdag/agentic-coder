@@ -907,7 +907,7 @@ def testgeneval_windowed(
     "--axes",
     "-a",
     type=str,
-    default="sast,dependency,judge,retries",
+    default="sast,dependency,judge,relevance,retries",
     help="Comma-separated ablation axes",
 )
 @click.option("--output-dir", "-o", type=str, default=None)
@@ -947,12 +947,35 @@ def testgeneval_windowed(
     help="Pytest timeout in seconds for repo-context tests",
 )
 @click.option(
+    "--mutation-max-mutants",
+    type=int,
+    default=None,
+    help="Max generated mutants per Python case when --quality full is enabled",
+)
+@click.option(
+    "--reliability-repeats",
+    type=int,
+    default=None,
+    help="Repeat passing Python suites this many times when --quality full is enabled",
+)
+@click.option(
+    "--skip-existing",
+    is_flag=True,
+    help="Reuse existing per-case JSON results instead of rerunning them",
+)
+@click.option(
+    "--failed-only",
+    is_flag=True,
+    help="Rerun failed or missing cases while reusing existing passing results",
+)
+@click.option(
     "--variants",
     type=str,
     default=None,
     help=(
         "Comma-separated list of specific variant names to run, e.g. "
-        "'sast=off_dep=off_judge=off_k=0,sast=off_dep=off_judge=off_k=1'. "
+        "'sast=off_dep=off_judge=off_rel=off_k=0,"
+        "sast=off_dep=off_judge=off_rel=off_k=1'. "
         "Useful for re-running a small subset of contaminated variants "
         "without redoing the whole sweep."
     ),
@@ -969,6 +992,10 @@ def ablation(
     repo_setup,
     gate_policy,
     repo_timeout,
+    mutation_max_mutants,
+    reliability_repeats,
+    skip_existing,
+    failed_only,
     variants,
     verbose,
 ):
@@ -989,9 +1016,15 @@ def ablation(
         config.evaluation.gate_policy = gate_policy
     if repo_timeout is not None:
         config.evaluation.repo_pytest_timeout = repo_timeout
+    if mutation_max_mutants is not None:
+        config.evaluation.mutation_max_mutants = max(0, mutation_max_mutants)
+    if reliability_repeats is not None:
+        config.evaluation.reliability_repeats = max(0, reliability_repeats)
     results_dir = output_dir or config.evaluation.results_dir
+    if max_cases is None:
+        max_cases = config.evaluation.max_cases
 
-    axes_list = [a.strip() for a in axes.split(",")]
+    axes_list = [a.strip() for a in axes.split(",") if a.strip()]
     only_variants = [v.strip() for v in variants.split(",") if v.strip()] if variants else None
 
     if benchmark == "all":
@@ -1011,6 +1044,8 @@ def ablation(
             max_cases_per_variant=max_cases,
             axes=axes_list,
             only_variants=only_variants,
+            skip_existing=skip_existing,
+            failed_only=failed_only,
         )
         console.print(f"[green]Completed {len(variant_metrics)} variants.[/green]")
 
